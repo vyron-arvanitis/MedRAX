@@ -1,0 +1,210 @@
+### Timeline: Fri Feb 13 → Thu Feb 19 (morning revision)
+
+Assume ~3–6 focused hours/day. Each day ends with a concrete deliverable so you know you’re on track.
+
+---
+
+## Fri Feb 13 — Paper → architecture map + repo entrypoints
+
+**Goal:** know the system at a block-diagram level and where it lives in code.
+
+1. **Paper deep read (2–3h)**
+
+* Write a 1-page summary:
+
+  * problem + why agents vs single-shot VLM
+  * what “tools” are (types, outputs)
+  * agent loop / stopping criteria / error handling
+  * benchmark setup + what is measured
+* Extract 8–12 “interview facts” (numbers, categories, components).
+
+2. **Repo orientation (2–3h)**
+
+* Identify and open these (even if you don’t fully understand yet):
+
+  * entrypoint (`main.py` or equivalent)
+  * agent graph / chain construction
+  * tool registry (where tools are declared/loaded)
+  * prompts (system/tool prompts)
+  * UI file (Gradio)
+  * config/env handling
+* Create a **module map** (bullet list: file → responsibility).
+
+**Deliverable (end of day):**
+
+* 1-page paper summary + module map (5–10 bullets).
+
+---
+
+## Sat Feb 14 — Environment + “minimal runnable path”
+
+**Goal:** get the simplest possible run, even with tools disabled.
+
+1. **Install + env sanity (2–3h)**
+
+* Create a clean env.
+* Verify `.env`/environment variables needed (API key, optional base URL).
+* Run import checks for core dependencies.
+
+2. **Make a “minimal mode” plan (2–3h)**
+
+* Identify which tools are heavy / require manual weights.
+* Decide a minimal subset you can run locally:
+
+  * LLM call + 1–2 lightweight tools (or stubs) + UI.
+* If models are too heavy, focus on getting:
+
+  * UI loads
+  * agent runs a step
+  * tool call pathway works (even with dummy tool outputs)
+
+**Deliverable:**
+
+* A short “Runbook” (10–15 lines): how to run, common errors, fixes.
+
+---
+
+## Sun Feb 15 — Tool contracts + failure modes
+
+**Goal:** be able to explain exactly what each tool consumes/produces and where things break.
+
+1. **Tool inventory table (3–4h)**
+   For each tool:
+
+* name + purpose
+* input type (image path/PIL/tensor, bbox format, etc.)
+* output type (text, bbox list, mask, score)
+* failure cases (missing weights, wrong image size, device mismatch)
+* where it is called from in the agent
+
+2. **Failure-mode story (1–2h)**
+   Prepare answers for:
+
+* what happens if a tool fails?
+* how to prevent hallucinated tool outputs?
+* how to validate / cross-check tool results?
+
+**Deliverable:**
+
+* Tool contract table + top 10 failure modes.
+
+---
+
+## Mon Feb 16 — Agent loop (LangGraph/LangChain) mastery day
+
+**Goal:** explain the control flow without handwaving.
+
+1. **Trace one full conversation path (3–4h)**
+
+* Pick one example query.
+* Manually trace:
+
+  * state initialization
+  * planner decision
+  * tool selection
+  * tool execution
+  * state update
+  * loop/stop condition
+* Write it as a numbered list (like “Step 1… Step 9”).
+
+2. **Whiteboard-ready pseudo-code (1–2h)**
+
+* Write pseudocode for:
+
+  * the agent loop
+  * a tool wrapper signature
+  * state schema (what fields exist)
+
+**Deliverable:**
+
+* One traced path + whiteboard pseudocode.
+
+---
+
+## Tue Feb 17 — UI + data plumbing (where most people get stuck)
+
+**Goal:** understand how the “chatbot + interface” is actually wired.
+
+1. **Gradio flow (2–3h)**
+
+* Find:
+
+  * upload handler (image/DICOM)
+  * session state (chat history, cached models)
+  * streaming intermediate results (masks/boxes/text)
+  * concurrency/queue behavior
+* Note where model loading happens (avoid reloading per request).
+
+2. **Input normalization (2–3h)**
+
+* Identify a single canonical image pipeline:
+
+  * load → normalize → resize → tool-specific conversion
+* If DICOM exists: identify conversion path and windowing.
+
+**Deliverable:**
+
+* UI call graph: “UI event → agent call → tool call → render output”.
+
+---
+
+## Wed Feb 18 — Evaluation + interview drill
+
+**Goal:** be ready for conversational grilling.
+
+1. **Evaluation/bench overview (2–3h)**
+
+* Understand:
+
+  * dataset/task categories
+  * what success means
+  * what is logged
+* Know how you would reproduce results (high level), even if you can’t run full.
+
+2. **Mock interview pack (3–4h)**
+   Prepare:
+
+* 2-minute pitch: what MedRAX is and why it matters
+* 5-minute walkthrough: architecture + loop + tools
+* 10 likely deep questions + bullet answers:
+
+  * why agentic over single VLM?
+  * how are tools chosen?
+  * how to handle tool disagreement?
+  * caching + latency strategies
+  * robustness / hallucination mitigation
+  * how to add a new tool
+  * where bugs usually happen (I/O + state)
+  * how evaluation avoids leakage / bias (high level)
+
+**Deliverable:**
+
+* “Interview sheet” (1–2 pages): pitch + Q/A bullets + diagram.
+
+---
+
+## Thu Feb 19 (morning) — Revision routine (60–120 min)
+
+**Goal:** crisp recall + confident explanations.
+
+1. Re-read your 1-page summary + architecture diagram (15 min)
+2. Rehearse the 2-minute pitch (10 min)
+3. Rehearse the traced conversation path (10–15 min)
+4. Scan your tool contract table (15–20 min)
+5. Run a quick smoke test (UI loads + one query) if possible (15–30 min)
+
+**Deliverable:**
+
+* Ready-to-say explanations for: loop, tools, UI wiring, failures.
+
+---
+
+### Highest-probability “stuck” areas (so you allocate extra time)
+
+* agent state + graph transitions (understanding “why it chose tool X”)
+* tool I/O mismatches (bbox formats, masks, resizing, dtype/device)
+* missing weights / gated models / manual downloads
+* DICOM conversion + windowing
+* UI session state + avoiding model reload per interaction
+
+If you paste the repo file tree (top-level) or the contents of `main.py` and the agent/tool registry file, a day-by-day plan can be tightened to the exact filenames and what to read in what order.

@@ -25,19 +25,24 @@ def load_prompts_from_file(file_path: str) -> Dict[str, str]:
 
     with open(file_path, "r") as file:
         for line in file:
-            line = line.strip()
-            if line.startswith("[") and line.endswith("]"):
+            line = line.strip()  # remove leading/trailing whitespace (incl. newline)
+
+            if line.startswith("[") and line.endswith("]"):  # new section header
                 if current_prompt:
+                    # store the previous section now that a new header starts
                     prompts[current_prompt] = "\n".join(current_content).strip()
-                current_prompt = line[1:-1]
-                current_content = []
+
+                current_prompt = line[1:-1]  # header name without brackets
+                current_content = []         # reset buffer for this section
+
             elif line:
-                current_content.append(line)
+                current_content.append(line)  # collect non-empty lines for current section
 
     if current_prompt:
+        # flush the final section (no next header to trigger storing it)
         prompts[current_prompt] = "\n".join(current_content).strip()
 
-    return prompts
+    return prompts  # dict is complete after full file parse
 
 
 def load_tool_prompts(tools: List[str], tools_json_path: str) -> str:

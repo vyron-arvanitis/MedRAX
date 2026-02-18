@@ -44,11 +44,11 @@ def initialize_agent(
     Returns:
         Tuple[Agent, Dict[str, BaseTool]]: Initialized agent and dictionary of tool instances
     """
-    prompts = load_prompts_from_file(prompt_file)
+    prompts = load_prompts_from_file(prompt_file) # NOTE: [done]
     prompt = prompts["MEDICAL_ASSISTANT"]
 
     all_tools = {
-        "ChestXRayClassifierTool": lambda: ChestXRayClassifierTool(device=device),
+        "ChestXRayClassifierTool": lambda: ChestXRayClassifierTool(device=device), # NOTE: [done]
         "ChestXRaySegmentationTool": lambda: ChestXRaySegmentationTool(device=device),
         "LlavaMedTool": lambda: LlavaMedTool(cache_dir=model_dir, device=device, load_in_8bit=True),
         "XRayVQATool": lambda: XRayVQATool(cache_dir=model_dir, device=device),
@@ -121,7 +121,7 @@ if __name__ == "__main__":
         tools_to_use=selected_tools,
         model_dir="/model-weights",  # Change this to the path of the model weights
         temp_dir="temp",  # Change this to the path of the temporary directory
-        device="cuda",  # Change this to the device you want to use
+        device="cpu",  # Change this to the device you want to use
         model="gpt-4o",  # Change this to the model you want to use, e.g. gpt-4o-mini
         temperature=0.7,
         top_p=0.95,

@@ -16,6 +16,7 @@ from langchain_core.tools import BaseTool
 class ChestXRayInput(BaseModel):
     """Input for chest X-ray analysis tools. Only supports JPG or PNG images."""
 
+    # Required field (`...`): callers must provide `image_path`.
     image_path: str = Field(
         ..., description="Path to the radiology image file, only supports JPG or PNG images"
     )
@@ -45,18 +46,29 @@ class ChestXRayClassifierTool(BaseTool):
         "Lung Opacity, Mass, Nodule, Pleural Thickening, Pneumonia, and Pneumothorax. "
         "Higher values indicate a higher likelihood of the condition being present."
     )
+    # NOTE: Gradio upload returns a filepath; `ChatInterface.handle_upload/process_message`
+    # must propagate that path into tool args (e.g., `image_path`) for LangChain tools.
+    # NOTE: [revisit]  when reviewing `handle_upload()` / `process_message()`.
     args_schema: Type[BaseModel] = ChestXRayInput
     model: xrv.models.DenseNet = None
     device: Optional[str] = "cuda"
     transform: torchvision.transforms.Compose = None
 
-    def __init__(self, model_name: str = "densenet121-res224-all", device: Optional[str] = "cuda"):
+    def __init__(
+        self,
+        # model trained on nih-pc-chex-mimic_ch-google-openi-rsna
+        # has output (batch_size , 18 probabilities for the pathologies ) using binary cross entropy
+        model_name: str = "densenet121-res224-all",
+        device: Optional[str] = "cuda",
+    ):
         super().__init__()
         self.model = xrv.models.DenseNet(weights=model_name)
         self.model.eval()
         self.device = torch.device(device) if device else "cuda"
         self.model = self.model.to(self.device)
-        self.transform = torchvision.transforms.Compose([xrv.datasets.XRayCenterCrop()])
+        self.transform = torchvision.transforms.Compose(
+            [xrv.datasets.XRayCenterCrop()]
+        )  # center crop the image remove outer borders
 
     def _process_image(self, image_path: str) -> torch.Tensor:
         """
@@ -75,15 +87,15 @@ class ChestXRayClassifierTool(BaseTool):
             FileNotFoundError: If the specified image file does not exist.
             ValueError: If the image cannot be properly loaded or processed.
         """
-        img = skimage.io.imread(image_path)
+        img = skimage.io.imread(image_path)  # (H, W, C)
         img = xrv.datasets.normalize(img, 255)
 
-        if len(img.shape) > 2:
-            img = img[:, :, 0]
+        if len(img.shape) > 2:  # if it is not grayscalye and it is (C, H, W)
+            img = img[:, :, 0]  # take (H, W, and first channel)-> (H, W )
 
-        img = img[None, :, :]
-        img = self.transform(img)
-        img = torch.from_numpy(img).unsqueeze(0)
+        img = img[None, :, :]  # (1, H, W)
+        img = self.transform(img)  # aply the centercrop
+        img = torch.from_numpy(img).unsqueeze(0)  # convert to tensor and add dimension (1, 1, H, W)
 
         img = img.to(self.device)
 
@@ -112,8 +124,11 @@ class ChestXRayClassifierTool(BaseTool):
             img = self._process_image(image_path)
 
             with torch.inference_mode():
-                preds = self.model(img).cpu()[0]
+                preds = self.model(img).cpu()[
+                    0
+                ]  # output is (N, 18) -> cpu for better convertibility drop the batch dim!
 
+            # pairs turend into dict of (pathology_name, probability for thispathology)
             output = dict(zip(xrv.datasets.default_pathologies, preds.numpy()))
             metadata = {
                 "image_path": image_path,
@@ -127,6 +142,7 @@ class ChestXRayClassifierTool(BaseTool):
                 "analysis_status": "failed",
             }
 
+    # Async wrapper required by LangChain; currently calls sync `_run()`.
     async def _arun(
         self,
         image_path: str,

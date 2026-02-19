@@ -92,7 +92,7 @@ class ChestXRaySegmentationTool(BaseTool):
 
         self.transform = torchvision.transforms.Compose(
             [xrv.datasets.XRayCenterCrop(), xrv.datasets.XRayResizer(512)]
-        )
+        ) # center crop the image remove outer borders, resize image to specific size
 
         self.temp_dir = temp_dir if isinstance(temp_dir, Path) else Path(temp_dir)
         self.temp_dir.mkdir(exist_ok=True)
@@ -144,11 +144,15 @@ class ChestXRaySegmentationTool(BaseTool):
         if mask.shape != original_img.shape:
             mask = self._align_mask_to_original(mask, original_img.shape)
 
-        props = skimage.measure.regionprops(mask.astype(int))
+        # returns list of how many groups of many onesn the grid of 0s and 1s we have 
+        props = skimage.measure.regionprops(mask.astype(int)) # convert mask to int from float
+        # NOTE[dicuss]: They assume a single connected component per organ and take props[0]. 
+        # If masks are fragmented, metrics may be off; a safer option would be to pick the largest region.
+        # main = max(props, key=lambda r: r.area)  # region with most pixels
         if not props:
             return None
 
-        props = props[0]
+        props = props[0] # props should have only one component with a good mask! 
         area_cm2 = mask.sum() * (self.pixel_spacing_mm / 10) ** 2
 
         img_height, img_width = mask.shape
@@ -159,7 +163,7 @@ class ChestXRaySegmentationTool(BaseTool):
             "center_dist": np.sqrt(((cy / img_height - 0.5) ** 2 + (cx / img_width - 0.5) ** 2)),
         }
 
-        organ_pixels = original_img[mask > 0]
+        organ_pixels = original_img[mask > 0] # from (H, W) to (N,) where N is the number of pixels where mask==1
         mean_intensity = organ_pixels.mean() if len(organ_pixels) > 0 else 0
         std_intensity = organ_pixels.std() if len(organ_pixels) > 0 else 0
 
@@ -186,22 +190,25 @@ class ChestXRaySegmentationTool(BaseTool):
         plt.figure(figsize=(10, 10))
         plt.imshow(
             original_img, cmap="gray", extent=[0, original_img.shape[1], original_img.shape[0], 0]
-        )
+        ) # extend: xmin=0, xmax= W, ymin=H, ymax=0
 
         # Generate color palette for organs
         colors = plt.cm.rainbow(np.linspace(0, 1, len(organ_indices)))
 
         # Process and overlay each organ mask
         for idx, (organ_idx, color) in enumerate(zip(organ_indices, colors)):
-            mask = pred_masks[0, organ_idx].cpu().numpy()
-            if mask.sum() > 0:
+            mask = pred_masks[0, organ_idx].cpu().numpy() # get he mask for one organ! (512, 512)
+            
+            # NOTE: mask.sum()-> how many pixels are predicted to be an organ?
+            if mask.sum() > 0:  # NOTE: > 0: there is at least one pixel predictes as organ
+                
                 # Align the mask to the original image coordinates
                 if mask.shape != original_img.shape:
                     mask = self._align_mask_to_original(mask, original_img.shape)
 
                 # Create a colored overlay with transparency
-                colored_mask = np.zeros((*original_img.shape, 4))
-                colored_mask[mask > 0] = (*color[:3], 0.3)
+                colored_mask = np.zeros((*original_img.shape, 4)) # (H, W, 4): 4 is RGBA, A: transparency
+                colored_mask[mask > 0] = (*color[:3], 0.3) # wherever pixel value > 0 color it and add transparency!
                 plt.imshow(
                     colored_mask, extent=[0, original_img.shape[1], original_img.shape[0], 0]
                 )
@@ -210,7 +217,7 @@ class ChestXRaySegmentationTool(BaseTool):
                 organ_name = list(self.organ_map.keys())[
                     list(self.organ_map.values()).index(organ_idx)
                 ]
-                plt.plot([], [], color=color, label=organ_name, linewidth=3)
+                plt.plot([], [], color=color, label=organ_name, linewidth=3) # only for the legend
 
         plt.title("Segmentation Overlay")
         plt.legend(bbox_to_anchor=(1.05, 1), loc="upper left")
@@ -243,20 +250,21 @@ class ChestXRaySegmentationTool(BaseTool):
 
             # Load and process image
             original_img = skimage.io.imread(image_path)
-            if len(original_img.shape) > 2:
-                original_img = original_img[:, :, 0]
+            if len(original_img.shape) > 2: # if it is not grayscalye and it is (C, H, W)
+                original_img = original_img[:, :, 0] # take (H, W, and first channel)-> (H, W)
 
             img = xrv.datasets.normalize(original_img, 255)
-            img = img[None, ...]
-            img = self.transform(img)
+            img = img[None, ...] # add batch size (1, H, W)
+            img = self.transform(img) # (1, 512, 512)
             img = torch.from_numpy(img)
             img = img.to(self.device)
 
             # Generate predictions
             with torch.no_grad():
-                pred = self.model(img)
-            pred_probs = torch.sigmoid(pred)
-            pred_masks = (pred_probs > 0.5).float()
+                # has inside x.repeat(1, 3, 1, 1) -> turns (1, 512, 512) -> (1, 3, 512, 512), 512 if not already
+                pred = self.model(img) # (1, 14, 512, 512)
+            pred_probs = torch.sigmoid(pred) # still (1, 14, 512, 512), but values in (0,1)
+            pred_masks = (pred_probs > 0.5).float() # binary( 0 or 1) masks, (1, 14, 512, 512)
 
             # Save visualization
             viz_path = self._save_visualization(original_img, pred_masks, organ_indices)

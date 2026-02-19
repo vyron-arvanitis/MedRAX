@@ -22,20 +22,54 @@ class LlavaMistralConfig(MistralConfig):
 
 
 class LlavaMistralModel(LlavaMetaModel, MistralModel):
+    
+    """
+    LlavaMetaModel 
+        is a mixin that adds the vision side of LLaVA:
+        it builds the vision tower (image encoder) and the projector that maps
+        image patch embeddings into the LLM hidden size so they can be inserted
+        into the text token stream.
+    MistralModel
+        provides the core language model (token embeddings + decoder stack).
+        LlavaMetaModel only adds vision modules; it does not implement the LM itself.
+    """
     config_class = LlavaMistralConfig
 
     def __init__(self, config: MistralConfig):
-        super(LlavaMistralModel, self).__init__(config)
+        super(LlavaMistralModel, self).__init__(config) # == super().__init__(config)
 
+
+# LLaVA architecture using Mistral as the text backbone.
+# Image
+#  ↓
+# Vision encoder (CLIP)
+#  ↓
+# Image feature vectors
+#  ↓
+# Projection layer (mm_projector)
+#  ↓
+# Mapped into Mistral embedding space
+#  ↓
+# Mistral processes everything together
+#  ↓
+# Text answer
+
+# Mistral is the language brain.
+# LLaVA is the multimodal wrapper that lets images talk to that brain.
 
 class LlavaMistralForCausalLM(MistralForCausalLM, LlavaMetaForCausalLM):
     config_class = LlavaMistralConfig
 
     def __init__(self, config):
-        super(MistralForCausalLM, self).__init__(config)
-        self.model = LlavaMistralModel(config)
+        # "skip MistralForCausalLM.__init__" and call the next __init__ in the MRO:
+        # however we still have all methods of ALL the parent classes
+        # So the intent is: keep Mistral behavior, replace Mistral’s internal model construction.
+        super(MistralForCausalLM, self).__init__(config)   
+        # LlavaMistralForCausalLM -> MistralForCausalLM -> MistralPreTrainedModel -> PreTrainedModel.__init__ (-> nn.Module.__init__)                                   
+       
+        self.model = LlavaMistralModel(config) # combine the vision module Llave (tower+projector) and the Mistral Language Model
 
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)  # maps hidden states → vocab logits, used in MistralForCausalLM.forward to produce token logits
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -99,8 +133,8 @@ class LlavaMistralForCausalLM(MistralForCausalLM, LlavaMetaForCausalLM):
         image_sizes: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Union[GenerateOutput, torch.LongTensor]:
-        position_ids = kwargs.pop("position_ids", None)
-        attention_mask = kwargs.pop("attention_mask", None)
+        position_ids = kwargs.pop("position_ids", None) # at first is None
+        attention_mask = kwargs.pop("attention_mask", None) # at first is None
         if "inputs_embeds" in kwargs:
             raise NotImplementedError("`inputs_embeds` is not supported")
 

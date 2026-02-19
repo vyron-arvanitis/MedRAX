@@ -33,11 +33,23 @@ from medrax.llava.constants import (
 
 class LlavaMetaModel:
     def __init__(self, config):
-        super(LlavaMetaModel, self).__init__(config)
+        super(LlavaMetaModel, self).__init__(config) # call next class MistralModel (builds LM)
 
         if hasattr(config, "mm_vision_tower"):
-            self.vision_tower = build_vision_tower(config, delay_load=True)
+            # image encoder: take image
+            
+            # Vision tower = the image encoder part of the system.
+            # It uses a pre-trained CLIP vision model to convert an input image into feature vectors.
+            # Concretely: the image is split into patches and the model outputs a sequence of patch embeddings
+            # (optionally with a CLS token). These embeddings are later projected into the LLM embedding space.
+            # Note: delay_load=True means the weights are not loaded yet; preprocessing happens before this call.
+            self.vision_tower = build_vision_tower(config, delay_load=True) # NOTE: [revisit]
+  
+            # Projector = the bridge from vision features to the LLM embedding space.
+            # It maps CLIP output size (mm_hidden_size) → LLM hidden size, so image tokens can be inserted
+            # alongside text tokens. Implemented as Linear or MLP depending on mm_projector_type.
             self.mm_projector = build_vision_projector(config)
+
 
     def get_vision_tower(self):
         vision_tower = getattr(self, "vision_tower", None)
@@ -137,15 +149,43 @@ class LlavaMetaForCausalLM(ABC):
         images,
         image_sizes=None,
     ):
+        """
+        Prepare text + image inputs for multimodal LLaVA forward/generation.
+
+        High-level behavior:
+        - If no vision tower or no images (or we are in cached generation with a single token),
+          return early and let the base LM handle text-only inputs.
+        - Otherwise, encode images with the vision tower, project features to LM hidden size,
+          and insert the projected image embeddings into the sequence
+          them into the token stream wherever the image token appears.
+
+        Inputs:
+        - input_ids: token ids containing image placeholders (IMAGE_TOKEN_INDEX).
+        - attention_mask/position_ids/labels: optional; created or adjusted if missing.
+        - images: preprocessed image tensors (or list of tensors).
+        - past_key_values: cache for fast generation (single-token path).
+
+        Returns:
+        - input_ids/position_ids/attention_mask/past_key_values/inputs_embeds/labels,
+          where inputs_embeds includes projected image features when applicable.
+        """
         vision_tower = self.get_vision_tower()
+        # Early exit when we can't/shouldn't do multimodal processing:
+        # - no vision tower (text‑only model)
+        # - no images provided
+        # - or we are in a cached generation step with only the newest token (input_ids length == 1)
+        # Note: the *first* call with a full prompt + images does NOT take this path;
+        # later generation steps (one token at a time) do.
         if vision_tower is None or images is None or input_ids.shape[1] == 1:
+            # During cached generation with images, HF passes only the last token.
+            # We extend attention_mask/position_ids to align with the cached sequence length.
             if (
                 past_key_values is not None
                 and vision_tower is not None
                 and images is not None
                 and input_ids.shape[1] == 1
             ):
-                target_shape = past_key_values[-1][-1].shape[-2] + 1
+                target_shape = past_key_values[-1][-1].shape[-2] + 1  # past length + current token
                 attention_mask = torch.cat(
                     (
                         attention_mask,
@@ -157,17 +197,20 @@ class LlavaMetaForCausalLM(ABC):
                     ),
                     dim=1,
                 )
+                # Position of the last token after extending the mask
                 position_ids = torch.sum(attention_mask, dim=1).unsqueeze(-1) - 1
+            # Return without image embeddings (inputs_embeds=None); caller will use input_ids directly
             return input_ids, position_ids, attention_mask, past_key_values, None, labels
 
-        if type(images) is list or images.ndim == 5:
-            concat_images = torch.cat([image for image in images], dim=0)
-            image_features = self.encode_images(concat_images)
-            split_sizes = [image.shape[0] for image in images]
+
+        if type(images) is list or images.ndim == 5: # (B, N images, C, H, W)
+            concat_images = torch.cat([image for image in images], dim=0) # run the vision tower once on a big batch!
+            image_features = self.encode_images(concat_images) # projected image mbeddings
+            split_sizes = [image.shape[0] for image in images]  # how many images belonged to each original item
             image_features = torch.split(image_features, split_sizes, dim=0)
-            image_features = [x.flatten(0, 1).to(self.device) for x in image_features]
+            image_features = [x.flatten(0, 1).to(self.device) for x in image_features] # list of (N_i * V, H) per sample
         else:
-            image_features = self.encode_images(images).to(self.device)
+            image_features = self.encode_images(images).to(self.device) # tensor (B, V, H) for single-image batches, V= number of vision tokens per image, H= hidden size after projection
 
         # TODO: image start / end is not implemented here to support pretraining.
         if getattr(self.config, "tune_mm_mlp_adapter", False) and getattr(
@@ -195,6 +238,12 @@ class LlavaMetaForCausalLM(ABC):
         if labels is None:
             labels = torch.full_like(input_ids, IGNORE_INDEX)
 
+        # Example:
+        # cur_input_ids    = [101, 5, 9, 0, 0]
+        # cur_attention_mask = [1, 1, 1, 0, 0]
+        # result -> [101, 5, 9]  (padding tokens removed)
+
+        # NOTE: [Continue]!
         input_ids = [
             cur_input_ids[cur_attention_mask]
             for cur_input_ids, cur_attention_mask in zip(input_ids, attention_mask)

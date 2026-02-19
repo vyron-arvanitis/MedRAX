@@ -29,7 +29,7 @@ class LlavaMedInput(BaseModel):
     question: str = Field(..., description="The question to ask about the medical image")
     image_path: Optional[str] = Field(
         None,
-        description="Path to the medical image file (optional), only supports JPG or PNG images",
+        description="Path to a single medical image file (optional), only supports JPG or PNG images",
     )
 
 
@@ -38,7 +38,8 @@ class LlavaMedTool(BaseTool):
 
     This tool uses a large language model fine-tuned on medical images to answer
     questions about medical images. It can handle both image-based questions and
-    general medical questions without images.
+    general medical questions without images. This wrapper expects at most one
+    image per request.
     """
 
     name: str = "llava_med_qa"
@@ -82,7 +83,13 @@ class LlavaMedTool(BaseTool):
     def _process_input(
         self, question: str, image_path: Optional[str] = None
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        if self.model.config.mm_use_im_start_end:
+        """
+        Build model inputs from text + optional image.
+
+        - Text: format prompt with image tokens, then tokenize into input_ids.
+        - Image: load with PIL and preprocess using the vision image_processor into a tensor.
+        """
+        if self.model.config.mm_use_im_start_end: # if true question = "<im_start><image><im_end> + question"
             question = (
                 DEFAULT_IM_START_TOKEN
                 + DEFAULT_IMAGE_TOKEN
@@ -91,26 +98,26 @@ class LlavaMedTool(BaseTool):
                 + question
             )
         else:
-            question = DEFAULT_IMAGE_TOKEN + "\n" + question
+            question = DEFAULT_IMAGE_TOKEN + "\n" + question # "-200 + question"
 
         conv = conv_templates["vicuna_v1"].copy()
-        conv.append_message(conv.roles[0], question)
-        conv.append_message(conv.roles[1], None)
+        conv.append_message(conv.roles[0], question) # "USER". question
+        conv.append_message(conv.roles[1], None) # "ASSISTANT" , NONE
         prompt = conv.get_prompt()
 
         input_ids = (
             tokenizer_image_token(prompt, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
             .unsqueeze(0)
             .cuda()
-        )
+        ) # take the prompt turn it into tokenized chunks and where <image> was replace with IMAGE_TOKEN_INDEX
 
         image_tensor = None
         if image_path:
-            image = Image.open(image_path)
+            image = Image.open(image_path) # PIL images
             image_tensor = process_images([image], self.image_processor, self.model.config)[0]
             image_tensor = image_tensor.unsqueeze(0).half().cuda()
 
-        return input_ids, image_tensor
+        return input_ids, image_tensor 
 
     def _run(
         self,

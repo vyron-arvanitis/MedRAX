@@ -19,6 +19,17 @@ def load_pretrained_model(
     low_cpu_mem_usage=True,
     torch_dtype=torch.bfloat16,
 ):
+    """
+    Load a model + tokenizer (and optionally a vision image processor for LLaVA).
+
+    Branches:
+    1) LLaVA path: loads LlavaMistralForCausalLM + tokenizer, then wires vision tower + projector.
+    2) Non-LLaVA path:
+       - If model_base is provided: load base LM + merge PEFT/LoRA weights from model_path.
+       - Else: load a plain AutoModelForCausalLM from model_path (special-case MPT).
+
+    Returns: tokenizer, model, image_processor (None for text-only), context_len.
+    """
 
     kwargs = {}
 
@@ -31,9 +42,13 @@ def load_pretrained_model(
         kwargs["load_in_8bit"] = True
     elif load_in_4bit:
         # kwargs["load_in_4bit"] = True
-        kwargs["quantization_config"] = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_compute_dtype=torch_dtype,
+        
+        # Load the LLM with 4-bit stored weights to save VRAM; 
+        # do the math in torch_dtype (e.g., bf16) for stability/speed; 
+        # use NF4 for better 4-bit accuracy; double-quantize scales to save a bit more memory.
+        kwargs["quantization_config"] = BitsAndBytesConfig(  
+            load_in_4bit=True, # store weight sin 4bit
+            bnb_4bit_compute_dtype=torch_dtype, # what type is to be used in the layers for computation
             bnb_4bit_use_double_quant=True,
             bnb_4bit_quant_type="nf4",
         )
@@ -41,20 +56,21 @@ def load_pretrained_model(
     # kwargs["torch_dtype"] = torch_dtype
 
     if "llava" in model_name.lower():
-        # Load LLaVA model
+        # LLaVA multimodal model path
         if "mistral" in model_name.lower():
-            tokenizer = AutoTokenizer.from_pretrained(model_path, cache_dir=cache_dir)
-            model = LlavaMistralForCausalLM.from_pretrained(
+            # convert text to tokens, prevent re-downloading on every run with the cache_dir
+            tokenizer = AutoTokenizer.from_pretrained(model_path, cache_dir=cache_dir) 
+            model = LlavaMistralForCausalLM.from_pretrained( # intantiate  `LlavaMistralForCausalLM`
                 model_path,
-                low_cpu_mem_usage=low_cpu_mem_usage,
-                use_flash_attention_2=False,
+                low_cpu_mem_usage=low_cpu_mem_usage, # load model in memory-efficient way
+                use_flash_attention_2=False, # disable FlashAttention v2 kernel
                 cache_dir=cache_dir,
-                torch_dtype=torch_dtype,
+                torch_dtype=torch_dtype, # the type to load weights into
                 **kwargs,
             )
 
     else:
-        # Load language model
+        # Text-only language model path
         if model_base is not None:
             # PEFT model
             from peft import PeftModel
@@ -76,6 +92,7 @@ def load_pretrained_model(
             print("Convert to FP16...")
             model.to(torch_dtype)
         else:
+            # Plain AutoModelForCausalLM (special-case MPT)
             use_fast = False
             if "mpt" in model_name.lower():
                 tokenizer = AutoTokenizer.from_pretrained(

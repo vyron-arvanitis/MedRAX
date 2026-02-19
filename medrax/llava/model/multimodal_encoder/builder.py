@@ -13,3 +13,4 @@ def build_vision_tower(vision_tower_cfg, **kwargs):
         or vision_tower.startswith("laion")
     ):
         return CLIPVisionTower(vision_tower, args=vision_tower_cfg, **kwargs)
+

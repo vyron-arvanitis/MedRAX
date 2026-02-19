@@ -30,6 +30,13 @@ def expand2square(pil_img, background_color):
 
 
 def process_images(images, image_processor, model_cfg):
+    """
+    Preprocess a list of PIL images for the vision tower.
+
+    - Optionally pad to square if model_cfg.image_aspect_ratio == "pad".
+    - Use the CLIP image_processor to resize/normalize into pixel_values.
+    - Return a stacked tensor if all images end up the same shape; otherwise return a list of tensors.
+    """
     image_aspect_ratio = getattr(model_cfg, "image_aspect_ratio", None)
     new_images = []
     for image in images:
@@ -48,32 +55,40 @@ def process_images(images, image_processor, model_cfg):
     return new_images
 
 
-def tokenizer_image_token(
-    prompt, tokenizer, image_token_index=IMAGE_TOKEN_INDEX, return_tensors=None
-):
-    prompt_chunks = [tokenizer(chunk).input_ids for chunk in prompt.split("<image>")]
+def tokenizer_image_token(prompt, tokenizer, image_token_index=IMAGE_TOKEN_INDEX, return_tensors=None):
+    # Split prompt by "<image>" so we know where the image placeholder is
+    # Each chunk is tokenized separately → list of token-id lists
+    # prompt = "Describe this <image> and compare to this <image>."
+    # prompt.split("<image>") -> [ "Describe this", " and comapre to this " , "."]
+    # tokenizer(chunk).input_ids-> [ [ 1, 5, 232 ,2546] , [395, 3, 6], [2] ] 
+    prompt_chunks = [tokenizer(chunk).input_ids for chunk in prompt.split("<image>")] # list[list[int]]
 
+    # Interleave: [chunk0, IMG, chunk1, IMG, chunk2, ...]
     def insert_separator(X, sep):
         return [ele for sublist in zip(X, [sep] * len(X)) for ele in sublist][:-1]
 
     input_ids = []
     offset = 0
+    # If tokenizer adds BOS token to the first chunk, keep it once
     if (
         len(prompt_chunks) > 0
         and len(prompt_chunks[0]) > 0
-        and prompt_chunks[0][0] == tokenizer.bos_token_id
+        and prompt_chunks[0][0] == tokenizer.bos_token_id ## begining of sequence token indicates start of prompt
     ):
         offset = 1
         input_ids.append(prompt_chunks[0][0])
 
+    # Interleave chunks with the special image token id, then flatten
     for x in insert_separator(prompt_chunks, [image_token_index] * (offset + 1)):
         input_ids.extend(x[offset:])
 
+    # Return tensor if requested
     if return_tensors is not None:
         if return_tensors == "pt":
             return torch.tensor(input_ids, dtype=torch.long)
         raise ValueError(f"Unsupported tensor type: {return_tensors}")
     return input_ids
+
 
 
 def get_model_name_from_path(model_path):

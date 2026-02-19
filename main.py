@@ -48,8 +48,11 @@ def initialize_agent(
     prompt = prompts["MEDICAL_ASSISTANT"]
 
     all_tools = {
+        # Classify CXR pathologies (18-condition classifier)
         "ChestXRayClassifierTool": lambda: ChestXRayClassifierTool(device=device), # NOTE: [done]
-        "ChestXRaySegmentationTool": lambda: ChestXRaySegmentationTool(device=device),
+        # Segment anatomical structures and return metrics
+        "ChestXRaySegmentationTool": lambda: ChestXRaySegmentationTool(device=device), # NOTE: [done]
+        # LLaVA-Med visual QA over medical images
         "LlavaMedTool": lambda: LlavaMedTool(cache_dir=model_dir, device=device, load_in_8bit=True),
         "XRayVQATool": lambda: XRayVQATool(cache_dir=model_dir, device=device),
         "ChestXRayReportGeneratorTool": lambda: ChestXRayReportGeneratorTool(

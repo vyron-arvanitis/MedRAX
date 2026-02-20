@@ -153,7 +153,7 @@ class LlavaMedTool(BaseTool):
                     use_cache=True,
                 )
 
-            output = self.tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0].strip()
+            output = self.tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0].strip() # go from token ids to real text otutput
             metadata = {
                 "question": question,
                 "image_path": image_path,

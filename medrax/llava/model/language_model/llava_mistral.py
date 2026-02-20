@@ -133,6 +133,34 @@ class LlavaMistralForCausalLM(MistralForCausalLM, LlavaMetaForCausalLM):
         image_sizes: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Union[GenerateOutput, torch.LongTensor]:
+        """Run autoregressive generation with optional image conditioning.
+
+        Behavior:
+        - Text-only path (`images is None`):
+          converts `inputs` token ids to `inputs_embeds` with the LM embedding table.
+        - Multimodal path (`images is not None`):
+          calls `prepare_inputs_labels_for_multimodal(...)` to replace image placeholder
+          tokens in `inputs` with projected image features, producing `inputs_embeds`
+          (and aligned `attention_mask` / optional `position_ids`).
+
+        Args:
+        - inputs: token ids, typically shape [B, T].
+        - images: optional preprocessed image tensor(s) passed through vision tower + projector.
+        - image_sizes: optional original image sizes forwarded to multimodal preparation.
+        - **kwargs: forwarded to Hugging Face `generate`, except this method consumes
+          `position_ids` and `attention_mask` from `kwargs`.
+
+        Notes:
+        - Passing `inputs_embeds` directly is not supported in this wrapper and raises
+          `NotImplementedError`.
+        - This method always calls `super().generate(...)` with `inputs_embeds` so text and
+          multimodal flows share the same generation entrypoint.
+
+        Returns:
+        - Generates sequences of token ids for a model with a language modeling head.
+        - `torch.LongTensor` by default (generated token ids), or `GenerateOutput` when
+          `return_dict_in_generate=True`.
+        """
         position_ids = kwargs.pop("position_ids", None) # at first is None
         attention_mask = kwargs.pop("attention_mask", None) # at first is None
         if "inputs_embeds" in kwargs:

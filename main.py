@@ -53,8 +53,9 @@ def initialize_agent(
         # Segment anatomical structures and return metrics
         "ChestXRaySegmentationTool": lambda: ChestXRaySegmentationTool(device=device), # NOTE: [done]
         # LLaVA-Med visual QA over medical images
-        "LlavaMedTool": lambda: LlavaMedTool(cache_dir=model_dir, device=device, load_in_8bit=True),
-        "XRayVQATool": lambda: XRayVQATool(cache_dir=model_dir, device=device),
+        "LlavaMedTool": lambda: LlavaMedTool(cache_dir=model_dir, device=device, load_in_8bit=True), # NOTE: [done]
+        # CheXagent chest X-ray QA and interpretation (single/multi-image prompts)
+        "XRayVQATool": lambda: XRayVQATool(cache_dir=model_dir, device=device), # NOTE: [done]
         "ChestXRayReportGeneratorTool": lambda: ChestXRayReportGeneratorTool(
             cache_dir=model_dir, device=device
         ),

@@ -19,16 +19,45 @@ def load_pretrained_model(
     low_cpu_mem_usage=True,
     torch_dtype=torch.bfloat16,
 ):
-    """
-    Load a model + tokenizer (and optionally a vision image processor for LLaVA).
+    """Load tokenizer + model weights for either multimodal LLaVA or text-only causal LM usage.
 
-    Branches:
-    1) LLaVA path: loads LlavaMistralForCausalLM + tokenizer, then wires vision tower + projector.
-    2) Non-LLaVA path:
-       - If model_base is provided: load base LM + merge PEFT/LoRA weights from model_path.
-       - Else: load a plain AutoModelForCausalLM from model_path (special-case MPT).
+    What this function does:
+    - Builds load kwargs (device mapping + optional 8-bit / 4-bit quantization config).
+    - Chooses a model-loading branch from `model_name` / `model_base`.
+    - For LLaVA models, also initializes the vision tower path used to turn images into
+      embeddings that can be fused with text tokens.
+    - Computes the usable context length from model config.
 
-    Returns: tokenizer, model, image_processor (None for text-only), context_len.
+    Loading branches:
+    1) LLaVA branch (`"llava"` in `model_name`):
+       - Loads `AutoTokenizer` from `model_path`.
+       - Loads `LlavaMistralForCausalLM` from `model_path`.
+       - Adds multimodal special tokens (image patch / optional image start-end).
+       - Loads and moves vision tower + projector to the target device/dtype.
+       - Exposes `vision_tower.image_processor` for image preprocessing.
+
+    2) Text-only branch (`"llava"` not in `model_name`):
+       - If `model_base` is provided: loads base model, applies PEFT/LoRA from `model_path`,
+         then merges adapters into the base weights.
+       - Else: loads a plain `AutoModelForCausalLM` from `model_path`
+         (with MPT-specific `trust_remote_code=True`).
+
+    Returns:
+    - tokenizer (`PreTrainedTokenizer`):
+      Tokenizer used to convert text <-> token ids for prompts and decoding.
+    - model (`PreTrainedModel`):
+      The full inference model used at generation time:
+      1) it takes current prompt/context tokens,
+      2) computes logits (scores) for the next token,
+      3) repeats this step autoregressively to build the output sequence.
+      In LLaVA mode, this same object also includes the image path:
+      `vision_tower` encodes pixels -> image features, and `mm_projector` maps those
+      features into the language-model embedding space before text generation.
+    - image_processor (`ImageProcessor` or `None`):
+      Image preprocessor from the vision tower for LLaVA models; `None` for text-only models.
+    - context_len (`int`):
+      Maximum supported input context length (from `model.config.max_sequence_length`
+      when available, otherwise fallback `2048`).
     """
 
     kwargs = {}

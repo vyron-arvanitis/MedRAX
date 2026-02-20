@@ -73,12 +73,12 @@ class XRayVQATool(BaseTool):
         self.cache_dir = cache_dir
 
         # Load tokenizer and model
-        self.tokenizer = AutoTokenizer.from_pretrained(
+        self.tokenizer = AutoTokenizer.from_pretrained(             # text <-> token ids
             model_name,
             trust_remote_code=True,
             cache_dir=cache_dir,
         )
-        self.model = AutoModelForCausalLM.from_pretrained(
+        self.model = AutoModelForCausalLM.from_pretrained(          # model (token ids/embeddings -> logits -> generated tokens)
             model_name,
             device_map=self.device,
             trust_remote_code=True,
@@ -99,7 +99,9 @@ class XRayVQATool(BaseTool):
         Returns:
             str: Model's response
         """
-        query = self.tokenizer.from_list_format(
+        
+        # turn umage_paths + prompt - > model expected multimodal output
+        query = self.tokenizer.from_list_format(   # wraps the below list in chat roles `system` `human` etc..
             [*[{"image": path} for path in image_paths], {"text": prompt}]
         )
         conv = [

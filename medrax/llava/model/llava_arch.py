@@ -150,42 +150,89 @@ class LlavaMetaForCausalLM(ABC):
         image_sizes=None,
     ):
         """
-        Prepare text + image inputs for multimodal LLaVA forward/generation.
+        Build LM-ready tensors by replacing IMAGE_TOKEN_INDEX placeholders with image embeddings.
 
-        High-level behavior:
-        - If no vision tower or no images (or we are in cached generation with a single token),
-          return early and let the base LM handle text-only inputs.
-        - Otherwise, encode images with the vision tower, project features to LM hidden size,
-          and insert the projected image embeddings into the sequence
-          them into the token stream wherever the image token appears.
+        Shape legend:
+        - B: batch size
+        - T: padded text length before multimodal expansion
+        - D: LM hidden size
+        - V: vision token count per image after vision tower + projector
+        - n_i: number of images for sample i
 
-        Inputs:
-        - input_ids: token ids containing image placeholders (IMAGE_TOKEN_INDEX).
-        - attention_mask/position_ids/labels: optional; created or adjusted if missing.
-        - images: preprocessed image tensors (or list of tensors).
-        - past_key_values: cache for fast generation (single-token path).
+        Expected inputs:
+        - input_ids: [B, T], contains IMAGE_TOKEN_INDEX markers.
+        - attention_mask: [B, T] or None.
+        - position_ids: [B, T] or None.
+        - labels: [B, T] or None.
+        - images:
+          1) tensor [B, C, H, W] (one image per sample), or
+          2) tensor [B, N, C, H, W] / list of length B with each item [n_i, C, H, W].
 
         Returns:
-        - input_ids/position_ids/attention_mask/past_key_values/inputs_embeds/labels,
-          where inputs_embeds includes projected image features when applicable.
+        - input_ids: None when multimodal embeddings are produced (caller should use inputs_embeds).
+        - position_ids: [B, T_mm] or None.
+        - attention_mask: [B, T_mm] or None.
+        - past_key_values: passthrough.
+        - inputs_embeds: [B, T_mm, D] or None.
+        - labels: [B, T_mm] or None.
+
+        T_mm is the per-batch max sequence length after replacing each image placeholder.
+        For one sample with k image placeholders and text chunks [t_0, ..., t_k], final length is:
+        sum(t_j) + sum(v_j), where v_j is the inserted image block length for placeholder j.
+
+        Concrete example: how IMAGE_TOKEN_INDEX expands sequence length.
+
+        Legend (and where each value is used/computed):
+        - T: original unpadded token length, including placeholders (Step 3, after unpadding).
+        - k: number of IMAGE_TOKEN_INDEX placeholders (Step 4: num_images).
+        - t_j: j-th text chunk length between placeholders (Step 4: cur_input_ids_noim/split_sizes).
+        - V: vision tokens inserted per placeholder (Step 1 output, inserted in Step 4).
+
+        Example (single sample):
+        We have k = 2 placeholders and text chunk lengths [4, 3, 1]. The unpadded token
+        sequence (Step 3 view) is:
+
+            [t t t t  <img>  t t t  <img>  t]
+
+        Counts before replacement (Step 4 logic):
+        - text tokens = 4 + 3 + 1 = 8
+        - placeholders = k = 2
+        - original unpadded length: T = 8 + 2 = 10
+
+        Placeholder replacement (Step 4):
+        Each <img> token is removed and replaced by a vision block of length V.
+        If V = 576 for both placeholders:
+
+            final_len = 4 + 576 + 3 + 576 + 1 = 1160
+                    = sum(t_j) + k * V
+                    = (4 + 3 + 1) + 2 * 576
+                    = 8 + 1152
+                    = 1160
+
+        General formula per sample (Step 4):
+            final_len = sum(t_j) + sum(v_j)
+
+        If each placeholder uses the same V (Step 4):
+            final_len = sum(t_j) + k * V
+
+        Post-processing:
+        - Step 5 may truncate final_len to tokenizer_model_max_length.
+        - Step 6 pads all samples in the batch to T_mm = max(final_len_i).
         """
+        ###################
+        # Step 0 - doing early-exit checks for text-only or cache-only decoding
+        ###################
         vision_tower = self.get_vision_tower()
-        # Early exit when we can't/shouldn't do multimodal processing:
-        # - no vision tower (text‑only model)
-        # - no images provided
-        # - or we are in a cached generation step with only the newest token (input_ids length == 1)
-        # Note: the *first* call with a full prompt + images does NOT take this path;
-        # later generation steps (one token at a time) do.
+        # Skip multimodal expansion when model/images are missing or generation is on one new token.
         if vision_tower is None or images is None or input_ids.shape[1] == 1:
-            # During cached generation with images, HF passes only the last token.
-            # We extend attention_mask/position_ids to align with the cached sequence length.
+            # Cached generation step: align mask/position to cache length + current token.
             if (
                 past_key_values is not None
                 and vision_tower is not None
                 and images is not None
                 and input_ids.shape[1] == 1
             ):
-                target_shape = past_key_values[-1][-1].shape[-2] + 1  # past length + current token
+                target_shape = past_key_values[-1][-1].shape[-2] + 1
                 attention_mask = torch.cat(
                     (
                         attention_mask,
@@ -197,37 +244,43 @@ class LlavaMetaForCausalLM(ABC):
                     ),
                     dim=1,
                 )
-                # Position of the last token after extending the mask
                 position_ids = torch.sum(attention_mask, dim=1).unsqueeze(-1) - 1
-            # Return without image embeddings (inputs_embeds=None); caller will use input_ids directly
             return input_ids, position_ids, attention_mask, past_key_values, None, labels
 
-
-        if type(images) is list or images.ndim == 5: # (B, N images, C, H, W)
-            concat_images = torch.cat([image for image in images], dim=0) # run the vision tower once on a big batch!
-            image_features = self.encode_images(concat_images) # projected image mbeddings
-            split_sizes = [image.shape[0] for image in images]  # how many images belonged to each original item
+        ###################
+        # Step 1 - doing image encoding and normalizing image feature layout
+        ###################
+        # Encode images and normalize to:
+        # - tensor [B, V, D] for one-image-per-sample input, or
+        # - list length B with each item [n_i * V, D] for multi-image input.
+        if type(images) is list or images.ndim == 5:
+            concat_images = torch.cat([image for image in images], dim=0)
+            image_features = self.encode_images(concat_images)
+            split_sizes = [image.shape[0] for image in images]
             image_features = torch.split(image_features, split_sizes, dim=0)
-            image_features = [x.flatten(0, 1).to(self.device) for x in image_features] # list of (N_i * V, H) per sample, N_i = # images belong to sample i
+            image_features = [x.flatten(0, 1).to(self.device) for x in image_features]
         else:
-            image_features = self.encode_images(images).to(self.device) # tensor (B, V, H) for single-image batches, V= # of vision tokens per image, H= hidden size after projection
+            image_features = self.encode_images(images).to(self.device)
 
+        ###################
+        # Step 2 - doing guard checks for unsupported IM_START/IM_END path
+        ###################
         # TODO: image start / end is not implemented here to support pretraining.
         if getattr(self.config, "tune_mm_mlp_adapter", False) and getattr(
             self.config, "mm_use_im_start_end", False
         ):
             raise NotImplementedError
 
-        # Let's just add dummy tensors if they do not exist,
-        # it is a headache to deal with None all the time.
-        # But it is not ideal, and if you have a better idea,
-        # please open an issue / submit a PR, thanks.
+        ###################
+        # Step 3 - doing optional-tensor normalization and text unpadding
+        ###################
+        # Save original optionals so we can restore None in outputs.
         _labels = labels
         _position_ids = position_ids
         _attention_mask = attention_mask
 
         if attention_mask is None:
-            attention_mask = torch.ones_like(input_ids, dtype=torch.bool) # torch.bool is important for it to behave like a mask!
+            attention_mask = torch.ones_like(input_ids, dtype=torch.bool)
         else:
             attention_mask = attention_mask.bool()
         if position_ids is None:
@@ -238,35 +291,34 @@ class LlavaMetaForCausalLM(ABC):
         if labels is None:
             labels = torch.full_like(input_ids, IGNORE_INDEX)
 
-        # Example:
-        # cur_input_ids    = [101, 5, 9, 0, 0]
-        # cur_attention_mask = [1, 1, 1, 0, 0]
-        # result -> [101, 5, 9]  (padding tokens removed)
-        input_ids = [                                       # list[torch.Tensor]
+        # Remove text padding first so each sample becomes a variable-length 1D sequence.
+        input_ids = [
             cur_input_ids[cur_attention_mask]
             for cur_input_ids, cur_attention_mask in zip(input_ids, attention_mask)
         ]
-        labels = [                                           # list[torch.Tensor]
+        labels = [
             cur_labels[cur_attention_mask]
             for cur_labels, cur_attention_mask in zip(labels, attention_mask)
         ]
 
+        ###################
+        # Step 4 - doing per-sample placeholder replacement with image features
+        ###################
         new_input_embeds = []
         new_labels = []
-        cur_image_idx = 0  # pointer into image_features (tensor[B,V,H] OR list[(N_i*V),H])
+        # Points to the next image feature block to consume.
+        cur_image_idx = 0
         for batch_idx, cur_input_ids in enumerate(input_ids):
-            num_images = (cur_input_ids == IMAGE_TOKEN_INDEX).sum()  # number of image tokens in this sample
+            num_images = (cur_input_ids == IMAGE_TOKEN_INDEX).sum()
             if num_images == 0:
-                # Shapes:
-                # image_features (single-image batch): tensor[B, V, H] -> cur_image_features: [V, H]
-                # image_features (multi-image list): list of tensors [(N_i*V), H] -> cur_image_features: [(N_i*V), H]
-                cur_image_features = image_features[cur_image_idx]  # consume this sample's image chunk
-                cur_input_embeds_1 = self.get_model().embed_tokens(cur_input_ids)  # [T, H] text embeddings
-                # no image tokens to insert; empty slice keeps concat path uniform: [T, H] + [0, H]
+                cur_image_features = image_features[cur_image_idx]
+                cur_input_embeds_1 = self.get_model().embed_tokens(cur_input_ids)
+                # Keep a shared concat path by appending an empty [0, D] slice.
                 cur_input_embeds = torch.cat([cur_input_embeds_1, cur_image_features[0:0]], dim=0)
                 new_input_embeds.append(cur_input_embeds)
                 new_labels.append(labels[batch_idx])
-                cur_image_idx += 1  # advance to next image chunk (keeps batch alignment)
+                # Keep image/text batch alignment even when this sample has no placeholder token.
+                cur_image_idx += 1
                 continue
 
             image_token_indices = (
@@ -285,51 +337,49 @@ class LlavaMetaForCausalLM(ABC):
                     cur_labels[image_token_indices[i] + 1 : image_token_indices[i + 1]]
                 )
 
-            # Shapes:
-            # cur_input_ids: [T] (text tokens + image placeholders)
-            # cur_input_ids_noim: list of (num_images + 1) chunks, each [t_i]
-            # sum_i t_i = T - num_images (image placeholders removed)
-            split_sizes = [x.shape[0] for x in cur_labels_noim]  # [t_0, t_1, ..., t_n]
-            cur_input_embeds = self.get_model().embed_tokens(torch.cat(cur_input_ids_noim))  # [sum_i t_i, H]
-            cur_input_embeds_no_im = torch.split(cur_input_embeds, split_sizes, dim=0)  # list of [t_i, H]
+            # Text-only chunks between placeholders: [t_0], [t_1], ..., [t_num_images].
+            split_sizes = [x.shape[0] for x in cur_labels_noim]
+            cur_input_embeds = self.get_model().embed_tokens(torch.cat(cur_input_ids_noim))
+            cur_input_embeds_no_im = torch.split(cur_input_embeds, split_sizes, dim=0)
             cur_new_input_embeds = []
             cur_new_labels = []
 
             for i in range(num_images + 1):
-                # Interleave: [text chunk i] then [image i] (if any)
-                # cur_input_embeds_no_im[i]: [t_i, H], cur_labels_noim[i]: [t_i]
+                # Interleave [text_i] and [image_i] so each placeholder is replaced.
                 cur_new_input_embeds.append(cur_input_embeds_no_im[i])
                 cur_new_labels.append(cur_labels_noim[i])
                 if i < num_images:
-                    # cur_image_features: [V, H] for single-image batch
-                    # or [(N_i*V), H] for multi-image list case
                     cur_image_features = image_features[cur_image_idx]
                     cur_image_idx += 1
                     cur_new_input_embeds.append(cur_image_features)
                     cur_new_labels.append(
                         torch.full(
-                            (cur_image_features.shape[0],),  # [V] or [(N_i*V)]
+                            (cur_image_features.shape[0],),
                             IGNORE_INDEX,
                             device=cur_labels.device,
                             dtype=cur_labels.dtype,
                         )
                     )
 
-            # Final per-sample sequence after inserting images:
-            # embeds: [sum_i t_i + sum_images V_i, H], labels: [sum_i t_i + sum_images V_i]
             cur_new_input_embeds = torch.cat(cur_new_input_embeds)
             cur_new_labels = torch.cat(cur_new_labels)
 
             new_input_embeds.append(cur_new_input_embeds)
             new_labels.append(cur_new_labels)
 
-        # Truncate sequences to max length as image embeddings can make the sequence longer
+        ###################
+        # Step 5 - doing truncation after multimodal expansion
+        ###################
+        # Image insertion can expand length; respect tokenizer max length if configured.
         tokenizer_model_max_length = getattr(self.config, "tokenizer_model_max_length", None)
         if tokenizer_model_max_length is not None:
             new_input_embeds = [x[:tokenizer_model_max_length] for x in new_input_embeds]
             new_labels = [x[:tokenizer_model_max_length] for x in new_labels]
 
-        # Combine them
+        ###################
+        # Step 6 - doing batch re-padding of multimodal embeddings, labels, and masks
+        ###################
+        # Re-pad to [B, T_mm, ...] for the LM.
         max_len = max(x.shape[0] for x in new_input_embeds)
         batch_size = len(new_input_embeds)
 
@@ -392,6 +442,9 @@ class LlavaMetaForCausalLM(ABC):
 
         new_input_embeds = torch.stack(new_input_embeds_padded, dim=0)
 
+        ###################
+        # Step 7 - doing output finalization and restoring original None semantics
+        ###################
         if _labels is None:
             new_labels = None
         else:
@@ -455,3 +508,4 @@ class LlavaMetaForCausalLM(ABC):
                     p.requires_grad = False
                 for p in self.get_output_embeddings().parameters():
                     p.requires_grad = False
+

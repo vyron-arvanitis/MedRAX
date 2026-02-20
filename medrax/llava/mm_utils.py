@@ -55,7 +55,36 @@ def process_images(images, image_processor, model_cfg):
     return new_images
 
 
-def tokenizer_image_token(prompt, tokenizer, image_token_index=IMAGE_TOKEN_INDEX, return_tensors=None):
+def tokenizer_image_token(prompt, tokenizer, image_token_index=IMAGE_TOKEN_INDEX, return_tensors=None) -> torch.Tensor | list[int]:
+    """
+    Build text input_ids with <image> placeholders for multimodal LLaVA.
+
+    Where it is used:
+    - Called when preparing prompts that will later go through
+      `prepare_inputs_labels_for_multimodal` in `medrax/llava/model/llava_arch.py`.
+      That function replaces each IMAGE_TOKEN_INDEX with projected image features.
+
+    What it does (analytic view):
+    1) Split the prompt string on the literal "<image>" marker.
+    2) Tokenize each text chunk independently.
+    3) Interleave the chunks with the special image token id (IMAGE_TOKEN_INDEX).
+    4) If the tokenizer adds a BOS token, keep it once at the very front.
+
+    Shapes / lengths:
+    - Let K = number of text chunks = (# of "<image>" markers + 1).
+    - Let T_i = token count of chunk i after tokenizer (including BOS on first chunk if present).
+    - `prompt_chunks`: length-K ragged list with per-chunk lengths [T_0, T_1, ..., T_{K-1}].
+    - `input_ids`: flat length T, where
+      T = (sum_i T_i) - (BOS_removed ? 1 : 0) + (# of "<image>" markers).
+
+    Returns:
+    - If `return_tensors is None`: Python list[int] of length T.
+    - If `return_tensors == "pt"`: torch.LongTensor with shape [T].
+
+    Note:
+    - The text length T referenced later in `llava_arch.py` is `len(cur_input_ids)`
+      after padding is removed by the attention mask.
+    """
     # Split prompt by "<image>" so we know where the image placeholder is
     # Each chunk is tokenized separately → list of token-id lists
     # prompt = "Describe this <image> and compare to this <image>."

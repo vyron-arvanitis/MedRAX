@@ -208,9 +208,9 @@ class LlavaMetaForCausalLM(ABC):
             image_features = self.encode_images(concat_images) # projected image mbeddings
             split_sizes = [image.shape[0] for image in images]  # how many images belonged to each original item
             image_features = torch.split(image_features, split_sizes, dim=0)
-            image_features = [x.flatten(0, 1).to(self.device) for x in image_features] # list of (N_i * V, H) per sample
+            image_features = [x.flatten(0, 1).to(self.device) for x in image_features] # list of (N_i * V, H) per sample, N_i = # images belong to sample i
         else:
-            image_features = self.encode_images(images).to(self.device) # tensor (B, V, H) for single-image batches, V= number of vision tokens per image, H= hidden size after projection
+            image_features = self.encode_images(images).to(self.device) # tensor (B, V, H) for single-image batches, V= # of vision tokens per image, H= hidden size after projection
 
         # TODO: image start / end is not implemented here to support pretraining.
         if getattr(self.config, "tune_mm_mlp_adapter", False) and getattr(
@@ -227,7 +227,7 @@ class LlavaMetaForCausalLM(ABC):
         _attention_mask = attention_mask
 
         if attention_mask is None:
-            attention_mask = torch.ones_like(input_ids, dtype=torch.bool)
+            attention_mask = torch.ones_like(input_ids, dtype=torch.bool) # torch.bool is important for it to behave like a mask!
         else:
             attention_mask = attention_mask.bool()
         if position_ids is None:
@@ -242,29 +242,31 @@ class LlavaMetaForCausalLM(ABC):
         # cur_input_ids    = [101, 5, 9, 0, 0]
         # cur_attention_mask = [1, 1, 1, 0, 0]
         # result -> [101, 5, 9]  (padding tokens removed)
-
-        # NOTE: [Continue]!
-        input_ids = [
+        input_ids = [                                       # list[torch.Tensor]
             cur_input_ids[cur_attention_mask]
             for cur_input_ids, cur_attention_mask in zip(input_ids, attention_mask)
         ]
-        labels = [
+        labels = [                                           # list[torch.Tensor]
             cur_labels[cur_attention_mask]
             for cur_labels, cur_attention_mask in zip(labels, attention_mask)
         ]
 
         new_input_embeds = []
         new_labels = []
-        cur_image_idx = 0
+        cur_image_idx = 0  # pointer into image_features (tensor[B,V,H] OR list[(N_i*V),H])
         for batch_idx, cur_input_ids in enumerate(input_ids):
-            num_images = (cur_input_ids == IMAGE_TOKEN_INDEX).sum()
+            num_images = (cur_input_ids == IMAGE_TOKEN_INDEX).sum()  # number of image tokens in this sample
             if num_images == 0:
-                cur_image_features = image_features[cur_image_idx]
-                cur_input_embeds_1 = self.get_model().embed_tokens(cur_input_ids)
+                # Shapes:
+                # image_features (single-image batch): tensor[B, V, H] -> cur_image_features: [V, H]
+                # image_features (multi-image list): list of tensors [(N_i*V), H] -> cur_image_features: [(N_i*V), H]
+                cur_image_features = image_features[cur_image_idx]  # consume this sample's image chunk
+                cur_input_embeds_1 = self.get_model().embed_tokens(cur_input_ids)  # [T, H] text embeddings
+                # no image tokens to insert; empty slice keeps concat path uniform: [T, H] + [0, H]
                 cur_input_embeds = torch.cat([cur_input_embeds_1, cur_image_features[0:0]], dim=0)
                 new_input_embeds.append(cur_input_embeds)
                 new_labels.append(labels[batch_idx])
-                cur_image_idx += 1
+                cur_image_idx += 1  # advance to next image chunk (keeps batch alignment)
                 continue
 
             image_token_indices = (
@@ -283,28 +285,38 @@ class LlavaMetaForCausalLM(ABC):
                     cur_labels[image_token_indices[i] + 1 : image_token_indices[i + 1]]
                 )
 
-            split_sizes = [x.shape[0] for x in cur_labels_noim]
-            cur_input_embeds = self.get_model().embed_tokens(torch.cat(cur_input_ids_noim))
-            cur_input_embeds_no_im = torch.split(cur_input_embeds, split_sizes, dim=0)
+            # Shapes:
+            # cur_input_ids: [T] (text tokens + image placeholders)
+            # cur_input_ids_noim: list of (num_images + 1) chunks, each [t_i]
+            # sum_i t_i = T - num_images (image placeholders removed)
+            split_sizes = [x.shape[0] for x in cur_labels_noim]  # [t_0, t_1, ..., t_n]
+            cur_input_embeds = self.get_model().embed_tokens(torch.cat(cur_input_ids_noim))  # [sum_i t_i, H]
+            cur_input_embeds_no_im = torch.split(cur_input_embeds, split_sizes, dim=0)  # list of [t_i, H]
             cur_new_input_embeds = []
             cur_new_labels = []
 
             for i in range(num_images + 1):
+                # Interleave: [text chunk i] then [image i] (if any)
+                # cur_input_embeds_no_im[i]: [t_i, H], cur_labels_noim[i]: [t_i]
                 cur_new_input_embeds.append(cur_input_embeds_no_im[i])
                 cur_new_labels.append(cur_labels_noim[i])
                 if i < num_images:
+                    # cur_image_features: [V, H] for single-image batch
+                    # or [(N_i*V), H] for multi-image list case
                     cur_image_features = image_features[cur_image_idx]
                     cur_image_idx += 1
                     cur_new_input_embeds.append(cur_image_features)
                     cur_new_labels.append(
                         torch.full(
-                            (cur_image_features.shape[0],),
+                            (cur_image_features.shape[0],),  # [V] or [(N_i*V)]
                             IGNORE_INDEX,
                             device=cur_labels.device,
                             dtype=cur_labels.dtype,
                         )
                     )
 
+            # Final per-sample sequence after inserting images:
+            # embeds: [sum_i t_i + sum_images V_i, H], labels: [sum_i t_i + sum_images V_i]
             cur_new_input_embeds = torch.cat(cur_new_input_embeds)
             cur_new_labels = torch.cat(cur_new_labels)
 

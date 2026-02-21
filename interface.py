@@ -29,9 +29,11 @@ class ChatInterface:
         self.upload_dir = Path("temp")
         self.upload_dir.mkdir(exist_ok=True)
         self.current_thread_id = None
-        # Separate storage for original and display paths
-        self.original_file_path = None  # For LLM (.dcm or other)
-        self.display_file_path = None  # For UI (always viewable format)
+        # Keep two paths:
+        # - original_file_path: what tools/LLM should reason over (can be .dcm)
+        # - display_file_path: what Gradio should render (always displayable image)
+        self.original_file_path = None
+        self.display_file_path = None
 
     def handle_upload(self, file_path: str) -> str:
         """
@@ -80,6 +82,7 @@ class ChatInterface:
         """
         image_path = self.original_file_path or display_image
         if image_path is not None:
+            # UI-only history item so the chat window can show the user image.
             history.append({"role": "user", "content": {"path": image_path}})
         if message is not None:
             history.append({"role": "user", "content": message})
@@ -101,7 +104,7 @@ class ChatInterface:
         """
         chat_history = chat_history or []
 
-        # Initialize thread if needed
+        # A stable thread_id lets LangGraph's checkpointer restore prior state for this chat.
         if not self.current_thread_id:
             self.current_thread_id = str(time.time())
 
@@ -109,10 +112,10 @@ class ChatInterface:
         image_path = self.original_file_path or display_image
 
         if image_path is not None:
-            # Send path for tools
+            # Plain text hint used by tool-oriented prompts (image path for local tools).
             messages.append({"role": "user", "content": f"image_path: {image_path}"})
 
-            # Load and encode image for multimodal
+            # Multimodal payload for model-side image understanding.
             with open(image_path, "rb") as img_file:
                 img_base64 = base64.b64encode(img_file.read()).decode("utf-8")
 
@@ -132,21 +135,28 @@ class ChatInterface:
             messages.append({"role": "user", "content": [{"type": "text", "text": message}]})
 
         try:
+            # Stream node outputs from Agent.workflow (defined in medrax/agent/agent.py).
+            # Per turn: process -> (optional execute) -> process ... until no more tool calls.
             for event in self.agent.workflow.stream(
-                {"messages": messages}, {"configurable": {"thread_id": self.current_thread_id}}
+                {"messages": messages},
+                {"configurable": {"thread_id": self.current_thread_id}},
             ):
                 if isinstance(event, dict):
                     if "process" in event:
                         content = event["process"]["messages"][-1].content
+                        # "process" returns an AIMessage produced by model.invoke(...).
                         if content:
                             content = re.sub(r"temp/[^\s]*", "", content)
                             chat_history.append(ChatMessage(role="assistant", content=content))
                             yield chat_history, self.display_file_path, ""
 
                     elif "execute" in event:
+                        # "execute" returns ToolMessage objects for each invoked tool.
                         for message in event["execute"]["messages"]:
                             tool_name = message.name
-                            tool_result = eval(message.content)[0]
+                            # ToolMessage.content is serialized text from Agent.execute_tools.
+                            # This UI expects a list-like payload and renders the first item.
+                            tool_result = eval(message.content)[0] # convert string from this line `content=str(result),` in agent .py into a python obejct ( dict or list ...)
 
                             if tool_result:
                                 metadata = {"title": f"🖼️ Image from tool: {tool_name}"}
@@ -162,7 +172,7 @@ class ChatInterface:
                                     )
                                 )
 
-                            # For image_visualizer, use display path
+                            # image_visualizer can return a new file to display in the UI.
                             if tool_name == "image_visualizer":
                                 self.display_file_path = tool_result["image_path"]
                                 chat_history.append(
@@ -195,8 +205,10 @@ def create_demo(agent, tools_dict):
     Returns:
         gr.Blocks: Gradio Blocks interface
     """
+    # Shared runtime state used by upload, chat, and thread callbacks.
     interface = ChatInterface(agent, tools_dict)
 
+    # Top-level Gradio layout container.
     with gr.Blocks(theme=gr.themes.Soft()) as demo:
         with gr.Column():
             gr.Markdown(
@@ -207,6 +219,7 @@ def create_demo(agent, tools_dict):
             )
 
             with gr.Row():
+                # Left panel: conversation history and text input.
                 with gr.Column(scale=3):
                     chatbot = gr.Chatbot(
                         [],
@@ -229,6 +242,7 @@ def create_demo(agent, tools_dict):
                                 container=False,
                             )
 
+                # Right panel: image preview and file controls.
                 with gr.Column(scale=3):
                     image_display = gr.Image(
                         label="Image", type="filepath", height=700, container=True
@@ -248,17 +262,21 @@ def create_demo(agent, tools_dict):
 
         # Event handlers
         def clear_chat():
+            # Reset uploaded file state and clear chat/image widgets.
             interface.original_file_path = None
             interface.display_file_path = None
             return [], None
 
         def new_thread():
+            # New thread_id starts a fresh checkpointed conversation.
             interface.current_thread_id = str(time.time())
             return [], interface.display_file_path
 
         def handle_file_upload(file):
+            # Save upload and return a displayable image path.
             return interface.handle_upload(file.name)
 
+        # Submit flow: add user message -> stream agent response -> re-enable textbox.
         chat_msg = txt.submit(
             interface.add_message, inputs=[txt, image_display, chatbot], outputs=[chatbot, txt]
         )
@@ -269,10 +287,12 @@ def create_demo(agent, tools_dict):
         )
         bot_msg.then(lambda: gr.Textbox(interactive=True), None, [txt])
 
+        # Both upload buttons share the same upload handler.
         upload_button.upload(handle_file_upload, inputs=upload_button, outputs=image_display)
 
         dicom_upload.upload(handle_file_upload, inputs=dicom_upload, outputs=image_display)
 
+        # Session controls.
         clear_btn.click(clear_chat, outputs=[chatbot, image_display])
         new_thread_btn.click(new_thread, outputs=[chatbot, image_display])
 

@@ -79,10 +79,12 @@ def initialize_agent(
     tools_to_use = tools_to_use or all_tools.keys()
     for tool_name in tools_to_use:
         if tool_name in all_tools:
-            tools_dict[tool_name] = all_tools[tool_name]()
+            tools_dict[tool_name] = all_tools[tool_name]() # instantiate the tool with () i.e ( execute the lambda function)
 
-    checkpointer = MemorySaver()
-    model = ChatOpenAI(model=model, temperature=temperature, top_p=top_p, **openai_kwargs)
+    # Stores LangGraph checkpoints in RAM and retrieves them by thread_id,
+    # so chat/workflow state can continue across turns (until process restart).
+    checkpointer = MemorySaver()  # NOTE: [done]
+    model = ChatOpenAI(model=model, temperature=temperature, top_p=top_p, **openai_kwargs) # NOTE: [done]
     agent = Agent(
         model,
         tools=list(tools_dict.values()),

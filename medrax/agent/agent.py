@@ -87,7 +87,10 @@ class Agent:
             self.log_path = Path(log_dir or "logs")
             self.log_path.mkdir(exist_ok=True)
 
-        # Define the agent workflow
+        # Define a two-node LangGraph loop:
+        # 1) "process" asks the model for the next assistant step.
+        # 2) "execute" runs requested tools and feeds results back as messages.
+
         workflow = StateGraph(AgentState)
         workflow.add_node("process", self.process_request)
         workflow.add_node("execute", self.execute_tools)
@@ -96,9 +99,15 @@ class Agent:
         )
         workflow.add_edge("execute", "process")
         workflow.set_entry_point("process")
-
+        # Topology:
+        # process --(tool_calls=True)--> execute --> process --> ...
+        # process --(tool_calls=False)---------------------------> END
+        # Compiling with a checkpointer enables thread-based state restore.
+        # interface.py provides thread_id when calling workflow.stream(...).
         self.workflow = workflow.compile(checkpointer=checkpointer)
         self.tools = {t.name: t for t in tools}
+        # Expose tool schemas to the model so it can emit structured tool_calls.
+        # Example shape: {"id": "...", "name": "tool_name", "args": {...}}
         self.model = model.bind_tools(tools)
 
     def process_request(self, state: AgentState) -> Dict[str, List[AnyMessage]]:
@@ -114,6 +123,7 @@ class Agent:
         messages = state["messages"]
         if self.system_prompt:
             messages = [SystemMessage(content=self.system_prompt)] + messages
+        # Returns an AIMessage; LangGraph appends it to state["messages"] via operator.add.
         response = self.model.invoke(messages)
         return {"messages": [response]}
 
@@ -127,6 +137,7 @@ class Agent:
         Returns:
             bool: True if tool calls exist, False otherwise.
         """
+        # The most recent model message determines whether we branch to execute or END.
         response = state["messages"][-1]
         return len(response.tool_calls) > 0
 
@@ -151,6 +162,8 @@ class Agent:
             else:
                 result = self.tools[call["name"]].invoke(call["args"])
 
+            # Wrap each tool result so it can be appended to state["messages"] and
+            # consumed on the next process_request() step.
             results.append(
                 ToolMessage(
                     tool_call_id=call["id"],

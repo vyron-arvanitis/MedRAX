@@ -30,7 +30,7 @@ class XRayPhraseGroundingInput(BaseModel):
 
 
 class XRayPhraseGroundingTool(BaseTool):
-    """Tool for grounding medical findings in chest X-ray images using the MAIRA-2 model.
+    """Tool for grounding (link text to specific regions of image) medical findings in chest X-ray images using the MAIRA-2 model.
 
     This tool processes chest X-ray images and locates specific medical findings mentioned
     in the input phrase. It returns both the bounding box coordinates and a visualization
@@ -154,22 +154,27 @@ class XRayPhraseGroundingTool(BaseTool):
             if image.mode != "RGB":
                 image = image.convert("RGB")
 
+            # Build model-ready tensors from (image + phrase):
+            # - input_ids: tokenized textual prompt produced by the processor
+            # - pixel_values: preprocessed image tensor(s) for the vision encoder
             inputs = self.processor.format_and_preprocess_phrase_grounding_input(
                 frontal_image=image, phrase=phrase, return_tensors="pt"
             )
-            inputs = {k: v.to(self.device) for k, v in inputs.items()}
 
             with torch.no_grad():
-                output = self.model.generate(
-                    **inputs,
-                    max_new_tokens=max_new_tokens,
-                    use_cache=True,
-                )
-
+                # Generation returns full sequence:
+                # [prompt tokens] + [generated continuation]
+                output = self.model.generate(...)
+                
+            # input_ids contains only the prompt tokens before generation
             prompt_length = inputs["input_ids"].shape[-1]
+
+            # Slice continuation tokens
             decoded_text = self.processor.decode(
                 output[0][prompt_length:], skip_special_tokens=True
             )
+            # Parse generated text into structured phrase-grounding predictions:
+            # [(predicted_phrase, [bbox1, bbox2, ...]), ...]
             predictions = self.processor.convert_output_to_plaintext_or_grounded_sequence(
                 decoded_text
             )
@@ -192,7 +197,7 @@ class XRayPhraseGroundingTool(BaseTool):
 
             # Process multiple predictions
             processed_predictions = []
-            for pred_phrase, pred_bboxes in predictions:
+            for pred_phrase, pred_bboxes in predictions: # pred boxes are in model's grounding coordinate space
                 if not pred_bboxes:  # Skip if no bounding boxes
                     continue
 

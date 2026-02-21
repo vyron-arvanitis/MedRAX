@@ -62,29 +62,36 @@ class ChestXRayReportGeneratorTool(BaseTool):
         super().__init__()
         self.device = torch.device(device) if device else "cuda"
 
-        # Initialize findings model
+        # Findings checkpoint is an image->text encoder-decoder (ViT encoder + text decoder),
+        # so it must be loaded as VisionEncoderDecoderModel, not a causal LM.
         self.findings_model = VisionEncoderDecoderModel.from_pretrained(
             "IAMJB/chexpert-mimic-cxr-findings-baseline", cache_dir=cache_dir
         ).eval()
+        # The decoder side was trained with a BERT tokenizer vocabulary/special tokens.
         self.findings_tokenizer = BertTokenizer.from_pretrained(
             "IAMJB/chexpert-mimic-cxr-findings-baseline", cache_dir=cache_dir
         )
+        # The encoder side is ViT, so we use ViTImageProcessor to apply the expected
+        # resize/normalize pipeline before passing pixel_values to the model.
         self.findings_processor = ViTImageProcessor.from_pretrained(
             "IAMJB/chexpert-mimic-cxr-findings-baseline", cache_dir=cache_dir
         )
 
-        # Initialize impression model
+        # Same architecture idea for impression: separate image->text checkpoint,
+        # specialized to generate concise clinical impression language.
         self.impression_model = VisionEncoderDecoderModel.from_pretrained(
             "IAMJB/chexpert-mimic-cxr-impression-baseline", cache_dir=cache_dir
         ).eval()
+        # Matching tokenizer for the impression decoder.
         self.impression_tokenizer = BertTokenizer.from_pretrained(
             "IAMJB/chexpert-mimic-cxr-impression-baseline", cache_dir=cache_dir
         )
+        # Matching ViT preprocessor for the impression encoder.
         self.impression_processor = ViTImageProcessor.from_pretrained(
             "IAMJB/chexpert-mimic-cxr-impression-baseline", cache_dir=cache_dir
         )
 
-        # Move models to device
+        # Move models to device  (only the heave neural nets)
         self.findings_model = self.findings_model.to(self.device)
         self.impression_model = self.impression_model.to(self.device)
 
@@ -150,9 +157,9 @@ class ChestXRayReportGeneratorTool(BaseTool):
             }
         )
 
-        generated_ids = model.generate(pixel_values, generation_config=generation_config)
+        generated_ids = model.generate(pixel_values, generation_config=generation_config) # tensor of integer token ids
 
-        return tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        return tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0] # convert ids into string!
 
     def _run(
         self,

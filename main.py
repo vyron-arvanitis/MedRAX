@@ -56,17 +56,22 @@ def initialize_agent(
         "LlavaMedTool": lambda: LlavaMedTool(cache_dir=model_dir, device=device, load_in_8bit=True), # NOTE: [done]
         # CheXagent chest X-ray QA and interpretation (single/multi-image prompts)
         "XRayVQATool": lambda: XRayVQATool(cache_dir=model_dir, device=device), # NOTE: [done]
-        "ChestXRayReportGeneratorTool": lambda: ChestXRayReportGeneratorTool(
+        # Generate findings and impression text from a chest X-ray image
+        "ChestXRayReportGeneratorTool": lambda: ChestXRayReportGeneratorTool( # NOTE: [done]
             cache_dir=model_dir, device=device
         ),
-        "XRayPhraseGroundingTool": lambda: XRayPhraseGroundingTool(
-            cache_dir=model_dir, temp_dir=temp_dir, load_in_8bit=True, device=device
+        # Ground (link text to specific regions of image) a medical phrase to chest X-ray regions with bounding boxes
+        "XRayPhraseGroundingTool": lambda: XRayPhraseGroundingTool(   # NOTE: [done]
+            cache_dir=model_dir, temp_dir=temp_dir, load_in_8bit=True, device=device 
         ),
-        "ChestXRayGeneratorTool": lambda: ChestXRayGeneratorTool(
+        # Generate synthetic chest X-ray images from text prompts
+        "ChestXRayGeneratorTool": lambda: ChestXRayGeneratorTool( # NOTE: [done]
             model_path=f"{model_dir}/roentgen", temp_dir=temp_dir, device=device
         ),
-        "ImageVisualizerTool": lambda: ImageVisualizerTool(),
-        "DicomProcessorTool": lambda: DicomProcessorTool(temp_dir=temp_dir),
+        # Surface an image path for UI display with optional title/description metadata
+        "ImageVisualizerTool": lambda: ImageVisualizerTool(),# NOTE: [done]
+        # Convert DICOM files to standard image format and extract key metadata
+        "DicomProcessorTool": lambda: DicomProcessorTool(temp_dir=temp_dir), # NOTE: [done]
     }
 
     # Initialize only selected tools or all if none specified

@@ -1,3 +1,15 @@
+"""
+Run CheXagent on benchmark questions using local case images.
+
+Reads:
+- `medrax/data/updated_cases.json`
+- `../benchmark/questions/<case_id>/<case_id>_*.json`
+- image files under `medrax/data/` using each subfigure `local_path`
+
+Creates:
+- `model_inference_<timestamp>.json` (inference log)
+"""
+
 import re
 import json
 import os
@@ -13,7 +25,7 @@ from tqdm import tqdm
 # Configure model settings
 MODEL_NAME = "StanfordAIMI/CheXagent-2-3b"
 DTYPE = torch.bfloat16
-DEVICE = "cuda"
+DEVICE = "cpu"
 
 # Configure logging
 log_filename = f"model_inference_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"

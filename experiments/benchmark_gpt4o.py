@@ -1,3 +1,14 @@
+"""
+Run GPT-4o on generated benchmark questions and log model answers.
+
+Reads:
+- `../data/eurorad_metadata.json`
+- `../benchmark/questions/<case_id>/<case_id>_*.json`
+
+Creates:
+- `api_usage_<timestamp>.json` (request and response log)
+"""
+
 import json
 import openai
 import os

@@ -173,3 +173,7 @@ logs/
 temp/
 
 .gradio/
+
+benchmark/questions
+chestagentbench/
+data/figures/

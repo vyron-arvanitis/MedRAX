@@ -1,4 +1,15 @@
-from typing import Dict, List, Optional, Any, Union
+"""
+Run OpenRouter Llama Vision on benchmark questions and log outputs.
+
+Reads:
+- `../data/eurorad_metadata.json`
+- `../benchmark/questions/<case_id>/<case_id>_*.json`
+
+Creates:
+- `api_usage_<timestamp>.json` (request and response log)
+"""
+
+from typing import Dict, List, Optional, Any, Union, Tuple
 import re
 import json
 import os
@@ -12,6 +23,7 @@ import backoff
 from datetime import datetime
 from tenacity import retry, wait_exponential, stop_after_attempt
 from openai import OpenAI
+
 
 # Configure model settings
 MODEL_NAME = "meta-llama/llama-3.2-90b-vision-instruct"

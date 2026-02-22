@@ -1,10 +1,24 @@
+"""
+Run LLaVA-Med benchmark inference against generated case questions.
+
+Reads:
+- `MedMAX/data/updated_cases.json`
+- `MedMAX/benchmark/questions/<case_id>/<case_id>_*.json`
+- image files resolved from case metadata paths
+
+Creates:
+- `<output_dir>/live_benchmark_log_<timestamp>.json`
+- `<output_dir>/final_results_<timestamp>.json`
+- `<output_dir>/benchmark_<timestamp>.log`
+"""
+
 import argparse
 import json
 import requests
 import base64
 from PIL import Image
 from io import BytesIO
-from llava.conversation import conv_templates
+from medrax.llava.conversation import conv_templates
 import time
 import os
 import glob

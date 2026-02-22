@@ -191,7 +191,7 @@ class ChatInterface:
                     role="assistant", content=f"❌ Error: {str(e)}", metadata={"title": "Error"}
                 )
             )
-            yield chat_history, self.display_file_path
+            yield chat_history, self.display_file_path, ""
 
 
 def create_demo(agent, tools_dict):

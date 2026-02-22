@@ -114,9 +114,9 @@ if __name__ == "__main__":
         "ChestXRaySegmentationTool",
         "ChestXRayReportGeneratorTool",
         "XRayVQATool",
-        "LlavaMedTool",
-        "XRayPhraseGroundingTool",
-        "ChestXRayGeneratorTool",
+        # "LlavaMedTool",
+        # "XRayPhraseGroundingTool",
+        # "ChestXRayGeneratorTool",
     ]
 
     # Collect the ENV variables

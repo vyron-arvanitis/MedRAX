@@ -10,9 +10,10 @@ This document is tailored to a research-style interview where you may be asked a
 MedRAX addresses the limitation that many CXR AI systems are narrow, single-task systems (e.g., only classification, only report generation). The project proposes a unified agent that can orchestrate multiple tools for richer clinical reasoning.
 
 ### 2) What is the core contribution?
-- A tool-augmented CXR reasoning agent architecture.
-- Integration of heterogeneous tools (classification, segmentation, VQA, grounding, reporting, generation, utility).
-- Evaluation through ChestAgentBench, a benchmark with 2,500 complex queries over 7 reasoning categories.
+- MedRAX: An AI framework integrating multiple chest X-ray (CXR) analysis tools without extra training, dynamically orchestrating components for complex medical queries.
+- ChestAgentBench: An evaluation framework featuring 2,500 queries across seven categories, built from 675 expert-curated clinical cases, to assess multi-step reasoning in CXR interpretation.
+- Performance: MedRAX significantly surpasses general-purpose and biomedical-specific models in complex reasoning tasks, offering transparent workflows.
+- Interface: A user-friendly interface enabling flexible deployment from local to cloud solutions, addressing healthcare privacy needs.
 
 ### 3) What is novel vs. engineering integration?
 - Likely novelty: practical agentic orchestration for medical image reasoning + benchmarked multi-step behavior.

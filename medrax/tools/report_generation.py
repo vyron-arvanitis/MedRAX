@@ -30,7 +30,7 @@ class ChestXRayInput(BaseModel):
 class ChestXRayReportGeneratorTool(BaseTool):
     """Tool that generates comprehensive chest X-ray reports with both findings and impressions.
 
-    This tool uses two Vision-Encoder-Decoder models (ViT-BERT) trained on CheXpert
+    This tool uses two Vision-Encoder-Decoder models (SwinV2-BERT) trained on CheXpert
     and MIMIC-CXR datasets to generate structured radiology reports. It automatically
     generates both detailed findings and impression summaries for each chest X-ray,
     following standard radiological reporting format.
@@ -62,19 +62,19 @@ class ChestXRayReportGeneratorTool(BaseTool):
         super().__init__()
         self.device = torch.device(device) if device else "cuda"
 
-        # Findings checkpoint is an image->text encoder-decoder (ViT encoder + text decoder),
+        # Findings checkpoint is an image->text encoder-decoder (SwinV2 encoder + BERT decoder),
         # so it must be loaded as VisionEncoderDecoderModel, not a causal LM.
         self.findings_model = VisionEncoderDecoderModel.from_pretrained(
-            "IAMJB/chexpert-mimic-cxr-findings-baseline", cache_dir=cache_dir
+            "IAMJB/chexpert-mimic-cxr-findings-baseline", cache_dir=cache_dir # architecture is SwinV2: https://huggingface.co/IAMJB/chexpert-mimic-cxr-findings-baseline/blob/main/config.json#L84
         ).eval()
         # The decoder side was trained with a BERT tokenizer vocabulary/special tokens.
         self.findings_tokenizer = BertTokenizer.from_pretrained(
-            "IAMJB/chexpert-mimic-cxr-findings-baseline", cache_dir=cache_dir
+            "IAMJB/chexpert-mimic-cxr-findings-baseline", cache_dir=cache_dir  # decoder tokenizer is BERT
         )
-        # The encoder side is ViT, so we use ViTImageProcessor to apply the expected
+        # The encoder side is SwinV2; this checkpoint uses ViTImageProcessor for expected
         # resize/normalize pipeline before passing pixel_values to the model.
         self.findings_processor = ViTImageProcessor.from_pretrained(
-            "IAMJB/chexpert-mimic-cxr-findings-baseline", cache_dir=cache_dir
+            "IAMJB/chexpert-mimic-cxr-findings-baseline", cache_dir=cache_dir  # image processor type is ViTImageProcessor
         )
 
         # Same architecture idea for impression: separate image->text checkpoint,
@@ -86,12 +86,12 @@ class ChestXRayReportGeneratorTool(BaseTool):
         self.impression_tokenizer = BertTokenizer.from_pretrained(
             "IAMJB/chexpert-mimic-cxr-impression-baseline", cache_dir=cache_dir
         )
-        # Matching ViT preprocessor for the impression encoder.
+        # Matching image preprocessor for the impression encoder.
         self.impression_processor = ViTImageProcessor.from_pretrained(
             "IAMJB/chexpert-mimic-cxr-impression-baseline", cache_dir=cache_dir
         )
 
-        # Move models to device  (only the heave neural nets)
+        # Move models to device (only the heavy neural nets).
         self.findings_model = self.findings_model.to(self.device)
         self.impression_model = self.impression_model.to(self.device)
 

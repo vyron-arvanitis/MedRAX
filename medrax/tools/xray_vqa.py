@@ -114,7 +114,9 @@ class XRayVQATool(BaseTool):
 
         # Run inference
         with torch.inference_mode():
-            output = self.model.generate(
+            # `generate` returns shape (batch_size, prompt_len( input_ids.size(1) = seq_len) + generated_len).
+            # We pass a single prompt, so batch_size=1 and `[0]` selects that sequence.
+            full_sequence = self.model.generate(
                 input_ids,
                 do_sample=False,
                 num_beams=1,
@@ -123,7 +125,12 @@ class XRayVQATool(BaseTool):
                 use_cache=True,
                 max_new_tokens=max_new_tokens,
             )[0]
-            response = self.tokenizer.decode(output[input_ids.size(1) : -1])
+
+            # Generated output includes the original prompt tokens first.
+            # Keep only newly generated tokens by slicing from prompt length onward.
+            # `-1` drops the terminal special token (e.g., EOS) to avoid decoding artifacts.
+            generated_tokens = full_sequence[input_ids.size(1) : -1]
+            response = self.tokenizer.decode(generated_tokens)
 
             return response
 

@@ -10,10 +10,9 @@ This document is tailored to a research-style interview where you may be asked a
 MedRAX addresses the limitation that many CXR AI systems are narrow, single-task systems (e.g., only classification, only report generation). The project proposes a unified agent that can orchestrate multiple tools for richer clinical reasoning.
 
 ### 2) What is the core contribution?
-- MedRAX: An AI framework integrating multiple chest X-ray (CXR) analysis tools without extra training, dynamically orchestrating components for complex medical queries.
-- ChestAgentBench: An evaluation framework featuring 2,500 queries across seven categories, built from 675 expert-curated clinical cases, to assess multi-step reasoning in CXR interpretation.
-- Performance: MedRAX significantly surpasses general-purpose and biomedical-specific models in complex reasoning tasks, offering transparent workflows.
-- Interface: A user-friendly interface enabling flexible deployment from local to cloud solutions, addressing healthcare privacy needs.
+- A tool-augmented CXR reasoning agent architecture.
+- Integration of heterogeneous tools (classification, segmentation, VQA, grounding, reporting, generation, utility).
+- Evaluation through ChestAgentBench, a benchmark with 2,500 complex queries over 7 reasoning categories.
 
 ### 3) What is novel vs. engineering integration?
 - Likely novelty: practical agentic orchestration for medical image reasoning + benchmarked multi-step behavior.
@@ -104,6 +103,85 @@ ChestAgentBench tests 7 reasoning categories (detection/classification/localizat
 
 ### Prompt 1: Tool router
 Design a router that maps query intents to candidate tools, then uses confidence-weighted fusion for final answer synthesis.
+
+#### First clarify current MedRAX behavior vs. proposed extension
+
+You are correct: in the current MedRAX setup, the LLM agent (ChatGPT-style model) reads the tool descriptions and decides which tool(s) to call; tool outputs are then fed back into the LLM, and the LLM synthesizes the final answer. There is not a strict explicit weighted-sum fusion module hard-coded in the main flow.
+
+So in an interview, frame it like this:
+- **Current system:** LLM-driven tool orchestration and synthesis.
+- **Proposed improvement (if interviewer asks design ideas):** add an explicit confidence-aware router/fusion layer before final synthesis.
+
+#### How to implement this extension (interview-ready answer)
+
+Use a 4-stage pattern:
+
+1. **Intent detection** (what task is being asked?)
+   - Parse the user query into one or more intents: `{classification, localization, report, comparison, generation, dicom}`.
+   - Fast option: rule + keyword mapping.
+   - Better option: small LLM/router prompt that outputs structured JSON.
+
+2. **Candidate tool selection**
+   - Map each intent to tools with a static lookup table.
+   - Example:
+     - `classification -> [ChestXRayClassifierTool, XRayVQATool]`
+     - `localization -> [XRayPhraseGroundingTool, ChestXRaySegmentationTool]`
+     - `report -> [ChestXRayReportGeneratorTool, XRayVQATool]`
+
+3. **Tool execution + normalized confidence**
+   - Execute top-k tools.
+   - Convert each tool output to a common schema:
+     - `answer`
+     - `confidence` in `[0,1]`
+     - `evidence` (e.g., logits/probabilities/bounding boxes/text span)
+   - If tool has no native confidence, estimate proxy confidence (e.g., softmax margin, answer consistency across prompt variants).
+
+4. **Confidence-weighted fusion + abstention**
+   - Score each tool output with:
+
+   ```text
+   fused_score_i = w_tool_i * confidence_i * evidence_quality_i
+   ```
+
+   - `w_tool_i` is a reliability prior learned from validation data (per task category).
+   - Pick answer with highest aggregated score.
+   - If top score < threshold, abstain and ask for more context or run one extra adjudication step.
+
+#### Minimal pseudocode (whiteboard)
+
+```python
+def route_and_fuse(query, image):
+    intents = detect_intents(query)  # e.g. ["classification", "localization"]
+    tools = select_tools(intents)    # e.g. [Classifier, Grounder, VQA]
+
+    outputs = []
+    for tool in tools:
+        raw = tool.run(query=query, image=image)
+        norm = normalize_output(raw, tool_name=tool.name)  # answer/conf/evidence
+        norm["weight"] = reliability_prior(tool.name, intents)
+        norm["fused_score"] = norm["weight"] * norm["confidence"] * norm["evidence_quality"]
+        outputs.append(norm)
+
+    best = aggregate(outputs)
+    if best["fused_score"] < ABSTAIN_THRESHOLD:
+        return {"decision": "abstain", "reason": "low confidence", "next_step": "request more context"}
+
+    return {"decision": best["answer"], "evidence": best["evidence"], "used_tools": [o["tool"] for o in outputs]}
+```
+
+#### What is a reliability prior? (plain explanation)
+A **reliability prior** is a pre-estimated trust score for each tool, usually conditioned on task type.
+
+- Think of it as: “Historically, how often is this tool correct on this kind of question?”
+- Example: if `ChestXRayClassifierTool` is very strong on classification but weaker on localization, then its prior is high for classification and lower for localization.
+- These priors are computed from validation data (accuracy + calibration), then used to scale each tool’s influence in fusion.
+- In a pure LLM-driven setup (current MedRAX), you can still use reliability priors by exposing them in the system prompt or by post-processing tool outputs before the final LLM synthesis.
+
+#### What to say if interviewer asks "how do you train weights?"
+- Build a validation split by task category.
+- For each tool, estimate per-category reliability (accuracy/calibration).
+- Set `w_tool_i` from calibrated performance (e.g., temperature-scaled expected accuracy).
+- Refit periodically as tools/models are updated.
 
 ### Prompt 2: Conflict resolution across tools
 If classifier and VQA disagree, use:
@@ -228,4 +306,3 @@ Paper thread: `https://openreview.net/forum?id=JiFfij5iv0`
   **Your answer:** ...  
   **Extra experiment:** ...  
   **If unresolved:** 🔴 bring as open discussion point in interview.
-

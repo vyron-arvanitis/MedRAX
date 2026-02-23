@@ -224,6 +224,103 @@ If classifier and VQA disagree, use:
 2. confidence estimates,
 3. optional adjudication prompt that includes both outputs explicitly.
 
+#### How disagreement works in current LLM-agent flow
+- Yes, the model can detect that tool outputs conflict because it sees tool outputs as structured/plain text content in the conversation state.
+- Practically, this is handled at the text/structured-message level after tool execution (the tool result content is passed back to the model), even though internally the model reasons in embedding space.
+- So for interview language: **inputs are explicit tool messages; decision is made by the LLM over those messages**.
+
+#### Practical decision policy you can propose
+When two tools disagree (example: 0.9 vs 0.7 confidence), use a deterministic policy before final synthesis:
+
+1. **Agreement check**
+   - Are predictions semantically equivalent? (e.g., "cardiomegaly" vs "enlarged cardiac silhouette")
+2. **Confidence margin check**
+   - If top confidence exceeds second by margin `m` (e.g., `m >= 0.15`) and tool prior is reasonable, choose top.
+3. **Reliability-aware override**
+   - If lower-confidence tool has much higher reliability prior for this task, allow override.
+4. **Adjudication step**
+   - If conflict remains near-tied, run a final adjudication prompt that explicitly compares evidence from both tools.
+5. **Abstain/fallback**
+   - If still uncertain, abstain or request more context.
+
+#### SOTA-style patterns for multi-tool conflict handling
+These are common modern patterns you can cite in interviews:
+
+- **Mixture-of-Experts style gating**: a learned router predicts which expert/tool to trust per query.
+- **Calibrated confidence fusion**: combine outputs only after calibration (temperature scaling / isotonic methods).
+- **Verifier-critic pipelines**: one model/tool proposes, another verifies consistency with evidence.
+- **Self-consistency / debate**: multiple reasoning traces or tool calls vote, then aggregate.
+- **Uncertainty-aware abstention**: reject option when confidence is low or disagreement is high.
+- **RAG-style evidence grounding**: final answer must be justified by explicit tool evidence snippets.
+
+In this repo, you can position these as **extensions on top of the current LLM-driven orchestration**.
+
+#### Code draft (interview sketch)
+
+```python
+def resolve_conflict(task, outputs, priors, margin=0.15, abstain_th=0.45):
+    """
+    outputs: list of dicts, each = {
+      "tool": str,
+      "prediction": str,
+      "confidence": float,      # normalized to [0,1]
+      "evidence": str,
+    }
+    priors: dict like priors[task][tool_name] -> float in [0,1]
+    """
+
+    # 1) normalize into reliability-aware scores
+    scored = []
+    for o in outputs:
+        prior = priors.get(task, {}).get(o["tool"], 0.5)
+        score = prior * o["confidence"]
+        scored.append({**o, "prior": prior, "score": score})
+
+    scored.sort(key=lambda x: x["score"], reverse=True)
+    top = scored[0]
+    second = scored[1] if len(scored) > 1 else None
+
+    # 2) if effectively same answer, merge evidence and return
+    if second and semantic_match(top["prediction"], second["prediction"]):
+        return {
+            "decision": top["prediction"],
+            "mode": "agreement",
+            "evidence": [top["evidence"], second["evidence"]],
+            "score": top["score"],
+        }
+
+    # 3) margin-based decision
+    if second is None or (top["score"] - second["score"] >= margin):
+        if top["score"] >= abstain_th:
+            return {"decision": top["prediction"], "mode": "direct", "evidence": [top["evidence"]], "score": top["score"]}
+
+    # 4) adjudication when close conflict
+    adjudicated = llm_adjudicate(
+        task=task,
+        candidates=[
+            {"tool": top["tool"], "prediction": top["prediction"], "confidence": top["confidence"], "prior": top["prior"], "evidence": top["evidence"]},
+            {"tool": second["tool"], "prediction": second["prediction"], "confidence": second["confidence"], "prior": second["prior"], "evidence": second["evidence"]},
+        ],
+        instruction=(
+            "Pick the best-supported answer. If evidence is insufficient or contradictory, return ABSTAIN."
+        ),
+    )
+
+    if adjudicated.get("decision") == "ABSTAIN":
+        return {"decision": "ABSTAIN", "mode": "uncertain", "score": max(top["score"], second["score"]) if second else top["score"]}
+
+    return {"decision": adjudicated["decision"], "mode": "adjudicated", "score": adjudicated.get("score", top["score"])}
+```
+
+#### Adjudication prompt template (quick)
+"""
+Task: {task}
+Candidate A: tool={tool_a}, pred={pred_a}, conf={conf_a}, prior={prior_a}, evidence={ev_a}
+Candidate B: tool={tool_b}, pred={pred_b}, conf={conf_b}, prior={prior_b}, evidence={ev_b}
+Instruction: Choose the best-supported prediction. If evidence is insufficient/contradictory, output ABSTAIN.
+Return JSON: {"decision": "...", "rationale": "...", "score": 0-1}
+"""
+
 ### Prompt 3: Safety-first output layer
 Add a final safety checker that can:
 - block overconfident claims,

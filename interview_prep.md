@@ -177,11 +177,46 @@ A **reliability prior** is a pre-estimated trust score for each tool, usually co
 - These priors are computed from validation data (accuracy + calibration), then used to scale each tool’s influence in fusion.
 - In a pure LLM-driven setup (current MedRAX), you can still use reliability priors by exposing them in the system prompt or by post-processing tool outputs before the final LLM synthesis.
 
+**Important implementation note:** in this repository, tools do **not** expose a built-in field like `ChestXRayClassifierTool.reliability_prior`.
+- `reliability_prior` is a design-time/runtime value you compute externally from validation experiments.
+- In practice, store priors in a config/dictionary (for example: `priors[task][tool_name]`) and apply them in your router/fusion logic.
+- Optionally, you can extend tool wrappers to attach metadata, but that is an added feature, not current default behavior.
+
+Example storage pattern:
+
+```python
+priors = {
+    "classification": {
+        "ChestXRayClassifierTool": 0.88,
+        "XRayVQATool": 0.72,
+    },
+    "localization": {
+        "XRayPhraseGroundingTool": 0.81,
+        "ChestXRaySegmentationTool": 0.76,
+    },
+}
+```
+
+At runtime you read `priors[task][tool_name]` and multiply it with confidence/evidence scores in your fusion logic.
+
 #### What to say if interviewer asks "how do you train weights?"
-- Build a validation split by task category.
-- For each tool, estimate per-category reliability (accuracy/calibration).
-- Set `w_tool_i` from calibrated performance (e.g., temperature-scaled expected accuracy).
-- Refit periodically as tools/models are updated.
+First clarify there are **two different kinds of weights**:
+
+1. **Model weights** (inside each tool’s backbone model)
+   - Example: `ChestXRayClassifierTool` uses a pretrained DenseNet checkpoint.
+   - These are learned during model training by the original model authors.
+
+2. **Router/fusion weights** (reliability priors, e.g., `w_tool_i`)
+   - These are **not** neural network parameters inside the tool.
+   - These are scalar trust coefficients you estimate from your own validation runs.
+
+How to estimate reliability priors in practice:
+- Build a validation split grouped by task category (classification/localization/report/etc.).
+- Run each candidate tool on that split.
+- Compute a reliability metric per tool per task (e.g., calibrated accuracy, ECE-adjusted score).
+- Map metrics to `[0,1]` and store as priors: `priors[task][tool_name] = score`.
+- Use these priors at inference time to scale each tool’s contribution.
+- Re-estimate periodically when models, prompts, or data distribution change.
 
 ### Prompt 2: Conflict resolution across tools
 If classifier and VQA disagree, use:

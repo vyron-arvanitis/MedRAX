@@ -321,6 +321,42 @@ Instruction: Choose the best-supported prediction. If evidence is insufficient/c
 Return JSON: {"decision": "...", "rationale": "...", "score": 0-1}
 """
 
+#### What is `semantic_match(...)` in the draft code?
+`semantic_match(a, b)` is a helper that checks whether two tool predictions are effectively the same clinical meaning even if wording differs.
+
+Examples:
+- `"cardiomegaly"` vs `"enlarged cardiac silhouette"` -> match
+- `"pleural effusion"` vs `"effusion"` -> likely match (depending on ontology granularity)
+- `"pneumothorax"` vs `"pleural effusion"` -> no match
+
+Minimal implementation options (in increasing quality):
+1. **Normalization + synonym table** (fast, deterministic)
+2. **Ontology mapping** (e.g., map terms to canonical labels/UMLS concepts)
+3. **LLM/NLI semantic equivalence check** with structured output
+
+Quick deterministic sketch:
+
+```python
+SYNONYMS = {
+    "cardiomegaly": {"cardiomegaly", "enlarged cardiac silhouette"},
+    "pleural_effusion": {"pleural effusion", "effusion"},
+    "pneumothorax": {"pneumothorax", "collapsed lung"},
+}
+
+def canonicalize(label: str) -> str:
+    x = label.strip().lower()
+    for canonical, variants in SYNONYMS.items():
+        if x in variants:
+            return canonical
+    return x
+
+def semantic_match(a: str, b: str) -> bool:
+    return canonicalize(a) == canonicalize(b)
+```
+
+In interview, say: use deterministic canonicalization first, and only call an LLM adjudicator when canonical labels still disagree.
+
+
 ### Prompt 3: Safety-first output layer
 Add a final safety checker that can:
 - block overconfident claims,

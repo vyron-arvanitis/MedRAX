@@ -363,6 +363,76 @@ Add a final safety checker that can:
 - request missing context,
 - present uncertainty bands.
 
+
+#### Code draft (interview sketch)
+
+```python
+
+HIGH_CERTAINTY = re.compile(r"\b(definitely|certainly|confirmed|no doubt|always|never)\b", re.I)
+
+
+def confidence_band(score: float) -> str:
+    if score >= 0.80:
+        return "high"
+    if score >= 0.60:
+        return "moderate"
+    return "low"
+
+def safety_vest(final_answer: str, tool_outputs: list[dict], confidence_threshold: float = 0.65):
+        """
+    tool_outputs item example:
+    {"tool":"chest_xray_classifier","prediction":"cardiomegaly","confidence":0.78,"prior":0.88}
+priors: dict like priors[task][tool_name] -> float in [0,1]
+
+    returns
+    ------
+    dict
+    dict{ "action" : BLOCK | REQUEST | ALLOW,
+          "band" : LOW | MODERATE | HIGH,
+          "safe_answer" :....
+    }
+    """
+
+    if not too tool_outputs:
+        return {
+            "action": "REQUEST_CONTEXT",
+            "band": "low",
+            "safe_answer": "I need image/tool evidence before giving a reliable conclusion."
+        }
+
+
+    scores = []
+    for out in tool_outputs:
+        conf = out["confidence"]
+        prior = out["prior"]
+        scores.append({"tool" : out["tool"], "score": conf*prior})
+
+    scores.sort(key=lamdba x: x["score"], reverse=True)
+    top_score =  scores[0]["score"]
+    band = confidence_band(top_score)
+
+    # block overconfident language when support is weak
+    if HIGH_CERTAINTY.search(final_anser) and top_score< confidence_threshold:
+        return {
+            "action": "BLOCK",
+            "band": band,
+            "safe_answer": "Evidence is insufficient for a definitive claim. I’m not confident enough to conclude."
+        }
+
+    if top < confidence_threshold:
+        return {
+            "action": "REQUEST_CONTEXT",
+            "band": band,
+            "safe_answer": f"Uncertainty: {band}. Please provide prior study/clinical context for safer interpretation."
+        }
+
+    return {"action": "ALLOW", "band": band, "safe_answer": f"Uncertainty: {band}. {final_answer}"}
+
+
+
+```
+
+
 ### Prompt 4: Fast prototyping idea
 Add a lightweight execution planner that minimizes expensive tool calls if a high-confidence answer is already achieved.
 

@@ -67,6 +67,121 @@ MedRAX addresses the limitation that many CXR AI systems are narrow, single-task
 - Grounding and LLaVA-Med expose quantization flags (`load_in_8bit`).
 - Image generation requires manual RoentGen setup.
 
+### 2.1) Tool output cheat sheet (8 core tool families)
+
+All tools return a tuple:
+
+```python
+(output, metadata)
+```
+
+`metadata` usually contains `analysis_status` plus context fields (`image_path`, prompt, etc.).
+
+| Family (paper-level) | Concrete tool in this repo | `BaseTool.name` used by agent | `output` shape from `_run` | Minimal example of `output` |
+|---|---|---|---|---|
+| Classification | `ChestXRayClassifierTool` | `chest_xray_classifier` | `Dict[str, float]` (pathology -> probability) | `{"Cardiomegaly": 0.78, "Effusion": 0.12, "...": ...}` |
+| Segmentation | `ChestXRaySegmentationTool` | `chest_xray_segmentation` | `Dict` with segmentation path + per-organ metrics | `{"segmentation_image_path": "temp/segmentation_ab12cd34.png", "metrics": {"Heart": {"confidence_score": 0.81, "...": "..."} }}` |
+| VQA | `XRayVQATool` | `chest_xray_expert` | `Dict` with free-text answer | `{"response": "No focal consolidation. Mild cardiomegaly."}` |
+| VQA (LLaVA-Med) | `LlavaMedTool` | `llava_med_qa` | `str` (free-text answer) | `"Findings suggest mild bibasilar atelectatic change."` |
+| Grounding | `XRayPhraseGroundingTool` | `xray_phrase_grounding` | `Dict` with phrases + bounding boxes + viz path | `{"predictions": [{"phrase": "Pleural effusion", "bounding_boxes": {"image_coordinates": [[0.1,0.6,0.4,0.9]]}}], "visualization_path": "temp/grounding_1a2b3c4d.png"}` |
+| Report generation | `ChestXRayReportGeneratorTool` | `chest_xray_report_generator` | `str` (full report text) | `"CHEST X-RAY REPORT\n\nFINDINGS:\n...\n\nIMPRESSION:\n..."` |
+| Image generation | `ChestXRayGeneratorTool` | `chest_xray_generator` | `Dict` with generated image path | `{"image_path": "temp/generated_xray_a1b2c3d4.png"}` |
+| Utility (DICOM conversion) | `DicomProcessorTool` | `dicom_processor` | `Dict` with converted image path | `{"image_path": "temp/processed_dicom_f0e1d2c3.png"}` |
+
+### 2.2) Function-calling walkthrough (what happens in `process -> execute -> process`)
+
+Example user turn:
+
+```text
+Please analyze the CXR image.
+```
+
+#### Step 0: how this is built in `interface.py` when an image is uploaded
+1. You upload an image using the Gradio upload button.
+2. The upload handler calls `handle_file_upload(file)` in `create_demo(...)`, which forwards to `interface.handle_upload(file.name)`.
+3. Inside `handle_upload(...)`:
+   - the file is copied into `temp/` with a timestamp name (`upload_<ts>.<ext>`),
+   - `self.original_file_path` is set to that saved path (this is the path tools should use),
+   - if the file is DICOM, it is converted for display and `self.display_file_path` is set to PNG.
+4. You then submit text (`"Please analyze the CXR image."`) with the textbox.
+5. Submit chain runs `txt.submit(...).then(interface.process_message, ...)`.
+6. Inside `process_message(...)`, it starts with:
+   - `messages = []`
+   - `image_path = self.original_file_path or display_image`
+7. If `image_path` exists, it appends message #1:
+   - a plain text hint for tool arguments: `"image_path: <path>"`
+8. Still inside the same branch, it reads image bytes, base64-encodes them, and appends message #2:
+   - multimodal `image_url` payload for model-side image understanding.
+9. If textbox text exists, it appends message #3:
+   - `{"type": "text", "text": "..."}`
+10. Finally, this assembled list is passed into LangGraph as:
+    - `self.agent.workflow.stream({"messages": messages}, ...)`
+
+So the actual `messages` passed to the workflow look like:
+
+```python
+state["messages"] = [
+  {"role": "user", "content": "image_path: temp/upload_1700000000.png"},
+  {
+    "role": "user",
+    "content": [
+      {
+        "type": "image_url",
+        "image_url": {"url": "data:image/jpeg;base64,<...>"}
+      }
+    ]
+  },
+  {"role": "user", "content": [{"type": "text", "text": "Please analyze the CXR image."}]}
+]
+```
+
+#### Step 1: `process_request`
+The agent prepends `SystemMessage(MEDICAL_ASSISTANT prompt)` and calls:
+
+```python
+response = self.model.invoke(messages)
+```
+
+Because tools are bound, `response` can contain tool calls, e.g.:
+
+```python
+AIMessage(
+  content="",
+  tool_calls=[
+    {"id": "call_1", "name": "chest_xray_classifier", "args": {"image_path": "temp/upload_1700000000.png"}},
+    {"id": "call_2", "name": "chest_xray_expert", "args": {"image_paths": ["temp/upload_1700000000.png"], "prompt": "Summarize major abnormalities."}},
+    {"id": "call_3", "name": "llava_med_qa", "args": {"question": "Do you see any acute cardiopulmonary process?", "image_path": "temp/upload_1700000000.png"}}
+  ]
+)
+```
+
+#### Step 2: `has_tool_calls`
+`state["messages"][-1]` is that latest **AIMessage** (not a single tool).
+- It checks `len(response.tool_calls) > 0`.
+- If true, graph goes to `execute`.
+
+#### Step 3: `execute_tools`
+The code loops over all requested calls:
+
+```python
+for call in tool_calls:
+    raw_result = self.tools[call["name"]].invoke(call["args"])
+```
+
+`BaseTool.invoke(...)` validates args and then runs that tool's `_run(...)`.
+So in this one execute pass, all 3 tools above run and each returns a `ToolMessage`.
+
+#### Step 4: loop back to `process`
+Now the model sees tool outputs in conversation state and decides next action:
+- either call more tools (e.g., add `chest_xray_report_generator`), or
+- produce final answer.
+
+If it asks for one more tool, you get another `execute` pass. This loop repeats until no tool calls remain.
+
+#### Key clarification for interview
+`response = state["messages"][-1]` does **not** mean "only one tool is called."
+It means "read the latest model message," and that message can contain **0, 1, or many** tool calls.
+
 ### 3) Benchmark script behavior (`quickstart.py`)
 - Supports URL or local-image loading.
 - Encodes images to base64 and sends multimodal messages.
